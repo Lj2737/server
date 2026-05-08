@@ -1,0 +1,14 @@
+# 智能胸牌服务管理系统 - 主网关节点依赖
+# 适配树莓派Debian ARM架构，Python 3.10+
+
+# Web框架
+fastapi>=0.104.0
+
+# ASGI服务器
+uvicorn[standard]>=0.24.0
+
+# 异步HTTP客户端（请求转发用）
+httpx>=0.25.0
+
+# 日志组件（控制台+文件双输出，按天分割）
+loguru>=0.7.0
