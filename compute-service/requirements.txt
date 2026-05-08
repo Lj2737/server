@@ -1,0 +1,28 @@
+# 智能胸牌服务管理系统 - 算力节点依赖
+# 适配树莓派Debian ARM架构，Python 3.10+
+
+# Web框架
+fastapi>=0.104.0
+
+# ASGI服务器
+uvicorn[standard]>=0.24.0
+
+# 异步HTTP客户端（预留外部调用用）
+httpx>=0.25.0
+
+# 日志组件
+loguru>=0.7.0
+
+# ASR模型推理（sherpa-onnx-sense-voice-small）
+# 树莓派ARM架构需从源码编译安装：pip install sherpa-onnx
+sherpa-onnx>=1.9.0
+
+# LLM模型推理（qwen2.5-1.5b-instruct-q4_k_m.gguf）
+# 树莓派ARM架构需从源码编译安装：CMAKE_ARGS="-DGGML_BLAS=ON" pip install llama-cpp-python
+llama-cpp-python>=0.2.50
+
+# 数值计算（ASR音频采样数据处理）
+numpy>=1.24.0
+
+# 表单数据解析（行为识别接口使用FormData）
+python-multipart>=0.0.6

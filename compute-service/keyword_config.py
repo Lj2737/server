@@ -1,0 +1,171 @@
+"""
+智能胸牌服务管理系统 - 词库配置管理
+核心功能：
+1. 接收主网关广播的词库配置，本地缓存到内存+JSON文件
+2. 服务重启时自动从本地JSON文件加载配置
+3. 版本号校验：低版本不重复处理
+4. 更新LLM推理模块的词库引用，实时生效，无需重启服务
+"""
+import json
+import os
+from typing import Any, Dict, List, Optional
+from pathlib import Path
+
+from loguru import logger
+
+from config import KEYWORD_CONFIG_FILE, ConfigType
+
+
+class KeywordConfigManager:
+    """
+    词库配置管理器
+    - 内存缓存 + 本地JSON文件双存储
+    - 重启自动从JSON文件恢复配置
+    - 版本校验防止重复处理
+    - 实时更新LLM推理模块的词库引用
+    """
+
+    def __init__(self):
+        """初始化词库配置管理器"""
+        # 当前生效的配置版本号
+        self._current_version: str = ""
+        # 当前生效的词库配置内容（内存缓存）
+        self._current_config: Dict[str, Any] = {}
+        # 词库配置项列表（供LLM推理引用）
+        self._keyword_items: List[Dict[str, Any]] = []
+
+        # 确保数据目录存在
+        config_path = Path(KEYWORD_CONFIG_FILE)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 启动时从本地JSON文件恢复配置
+        self._load_from_file()
+
+    def _load_from_file(self) -> None:
+        """从本地JSON文件加载词库配置（重启恢复）"""
+        if os.path.exists(KEYWORD_CONFIG_FILE):
+            try:
+                with open(KEYWORD_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                self._current_version = data.get("config_version", "")
+                self._current_config = data.get("config_data", {})
+                self._keyword_items = data.get("items", [])
+
+                logger.info(
+                    f"词库配置从本地文件恢复 | 版本={self._current_version} | "
+                    f"条目数={len(self._keyword_items)}"
+                )
+            except Exception as e:
+                logger.error(f"词库配置文件加载失败 | 路径={KEYWORD_CONFIG_FILE} | 错误={e}")
+                # 加载失败时使用空配置，不影响服务启动
+                self._current_version = ""
+                self._current_config = {}
+                self._keyword_items = []
+        else:
+            logger.info("本地词库配置文件不存在，使用空配置")
+
+    def _save_to_file(self) -> None:
+        """将当前词库配置保存到本地JSON文件"""
+        try:
+            data = {
+                "config_version": self._current_version,
+                "config_data": self._current_config,
+                "items": self._keyword_items,
+            }
+            with open(KEYWORD_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            logger.info(
+                f"词库配置已保存到本地文件 | 版本={self._current_version} | "
+                f"路径={KEYWORD_CONFIG_FILE}"
+            )
+        except Exception as e:
+            logger.error(f"词库配置文件保存失败 | 错误={e}")
+
+    def sync_config(
+        self,
+        config_type: str,
+        config_version: str,
+        items: List[Dict[str, Any]],
+    ) -> bool:
+        """
+        同步词库配置（主网关广播调用）
+        - 校验config_type必须为KEYWORD
+        - 版本号校验：低版本不重复处理
+        - 更新内存缓存 + 本地文件
+        - 实时更新LLM推理模块的词库引用
+
+        Args:
+            config_type: 配置类型，必须为KEYWORD
+            config_version: 配置版本号
+            items: 配置明细数组
+
+        Returns:
+            同步是否成功
+        """
+        # 校验配置类型
+        if config_type != ConfigType.KEYWORD:
+            logger.warning(f"配置类型不匹配 | 期望=KEYWORD | 实际={config_type}")
+            return False
+
+        # 版本号校验：传入版本低于当前生效版本，跳过处理
+        if self._current_version and config_version <= self._current_version:
+            logger.info(
+                f"词库配置版本低于或等于当前版本，跳过同步 | "
+                f"当前版本={self._current_version} | 传入版本={config_version}"
+            )
+            return True  # 返回成功，避免主网关重试
+
+        # 更新内存缓存
+        old_version = self._current_version
+        self._current_version = config_version
+        self._current_config = {
+            "config_type": config_type,
+            "config_version": config_version,
+            "items": items,
+        }
+        self._keyword_items = items
+
+        # 保存到本地JSON文件
+        self._save_to_file()
+
+        logger.info(
+            f"词库配置同步完成 | 旧版本={old_version} → 新版本={config_version} | "
+            f"条目数={len(items)}"
+        )
+        return True
+
+    def get_current_version(self) -> str:
+        """获取当前生效的配置版本号"""
+        return self._current_version
+
+    def get_keyword_text(self) -> str:
+        """
+        获取词库配置的文本表示（供LLM推理使用）
+        将词库配置序列化为文本，注入到LLM的user_prompt中
+
+        Returns:
+            词库配置文本，空配置时返回"暂无词库配置"
+        """
+        if not self._keyword_items:
+            return "暂无词库配置"
+
+        # 将词库条目格式化为可读文本
+        parts = []
+        for item in self._keyword_items:
+            # 根据实际词库结构调整字段名
+            keyword = item.get("keyword", item.get("name", ""))
+            category = item.get("category", item.get("type", ""))
+            description = item.get("description", "")
+            if keyword:
+                if description:
+                    parts.append(f"- {keyword}（{category}）：{description}")
+                else:
+                    parts.append(f"- {keyword}（{category}）")
+
+        return "\n".join(parts) if parts else "暂无词库配置"
+
+    def get_keyword_items(self) -> List[Dict[str, Any]]:
+        """获取当前词库配置条目列表"""
+        return self._keyword_items
