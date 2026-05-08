@@ -7,27 +7,35 @@
 4. POST /api/v1/internal/config/sync - 词库配置同步
 """
 import asyncio
-import datetime
 import time
 
-from fastapi import APIRouter, Request, UploadFile, File, Form
+from fastapi import APIRouter, UploadFile, File, Form
 from loguru import logger
 
 from config import (
     MAX_CONCURRENT,
-    REQUEST_ID_HEADER,
     NODE_IP,
     BehaviorType,
     DimensionType,
     ConfigType,
-    DATETIME_FORMAT,
-    DATE_FORMAT,
 )
 from models import asr_model, llm_model, get_model_status
 from cache import IdempotencyCache
 from keyword_config import KeywordConfigManager
 from audio_utils import validate_wav_audio, clip_abnormal_audio, ensure_mono_audio
 from exception import ComputeException, ErrorCode, ErrorMsg
+from schemas import (
+    DiagnosisSummaryRequest,
+    DiagnosisSummaryResponse,
+    DiagnosisResultData,
+    DimensionItem,
+    ConfigSyncRequest,
+    ConfigSyncResponse,
+    ConfigSyncResultData,
+    HealthCheckResponse,
+    BehaviorRecognitionResponse,
+    BehaviorResultData,
+)
 
 # 创建API路由器
 router = APIRouter()
@@ -91,7 +99,7 @@ def _decrement_connections() -> None:
 
 # ==================== 健康检查接口 ====================
 
-@router.get("/health")
+@router.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     """
     健康检查接口（主网关负载均衡专用）
@@ -112,7 +120,10 @@ async def health_check():
 
 # ==================== 语音行为识别推理接口 ====================
 
-@router.post("/api/v1/internal/inference/behavior-recognition")
+@router.post(
+    "/api/v1/internal/inference/behavior-recognition",
+    response_model=BehaviorRecognitionResponse,
+)
 async def behavior_recognition(
     audio_file: UploadFile = File(..., description="音频文件（16000Hz、16bit、1-2声道WAV，多声道自动转单声道）"),
     device_no: str = Form(..., description="设备编号"),
@@ -292,62 +303,28 @@ async def behavior_recognition(
 
 # ==================== AI时段诊断总结推理接口 ====================
 
-@router.post("/api/v1/internal/inference/diagnosis-summary")
-async def diagnosis_summary(request: Request):
+@router.post(
+    "/api/v1/internal/inference/diagnosis-summary",
+    response_model=DiagnosisSummaryResponse,
+)
+async def diagnosis_summary(body: DiagnosisSummaryRequest):
     """
     AI时段诊断总结推理接口
     处理流程：
-    ① 入参格式与必填项校验
-    ② 幂等性校验
-    ③ 并发控制
+    ① FastAPI自动校验请求体（Pydantic模型：必填、类型、日期格式、枚举值）
+    ② 幂等性校验：5分钟内相同请求直接返回缓存结果
+    ③ 并发控制：超过单节点5路并发上限，返回429
     ④ LLM诊断推理
     ⑤ 封装结果返回
     """
     start_time = time.time()
-
-    # 解析请求体
-    try:
-        body = await request.json()
-    except Exception:
-        raise ComputeException(
-            code=ErrorCode.BAD_REQUEST,
-            msg="请求体JSON格式错误",
-            request_id="",
-        )
-
-    # ========== ① 入参校验 ==========
-    # 必填字段校验
-    required_fields = [
-        "employee_no", "start_date", "end_date",
-        "score", "dimension_scores", "behavior_stats",
-        "abnormal_behaviors", "request_id",
-    ]
-    for field in required_fields:
-        if field not in body or body[field] is None:
-            raise ComputeException(
-                code=ErrorCode.BAD_REQUEST,
-                msg=f"缺少必填字段: {field}",
-                request_id=body.get("request_id", ""),
-            )
-
-    # 日期格式校验
-    try:
-        datetime.datetime.strptime(body["start_date"], DATE_FORMAT)
-        datetime.datetime.strptime(body["end_date"], DATE_FORMAT)
-    except ValueError:
-        raise ComputeException(
-            code=ErrorCode.BAD_REQUEST,
-            msg="日期格式错误，要求yyyy-MM-dd",
-            request_id=body["request_id"],
-        )
-
-    request_id = body["request_id"]
+    request_id = body.request_id
 
     # ========== ② 幂等性校验 ==========
     # 幂等键：employee_no + start_date + end_date + request_id
     idempotency_key = (
-        f"diagnosis:{body['employee_no']}:{body['start_date']}:"
-        f"{body['end_date']}:{request_id}"
+        f"diagnosis:{body.employee_no}:{body.start_date}:"
+        f"{body.end_date}:{request_id}"
     )
     cached_result = await idempotency_cache.get(idempotency_key)
     if cached_result is not None:
@@ -371,19 +348,19 @@ async def diagnosis_summary(request: Request):
             # ========== ④ LLM诊断推理 ==========
             logger.info(
                 f"诊断总结LLM推理开始 | request_id={request_id} | "
-                f"employee_no={body['employee_no']} | "
-                f"时间范围={body['start_date']}~{body['end_date']}"
+                f"employee_no={body.employee_no} | "
+                f"时间范围={body.start_date}~{body.end_date}"
             )
 
             try:
                 llm_result = await llm_model.diagnosis_inference(
-                    employee_no=body["employee_no"],
-                    start_date=body["start_date"],
-                    end_date=body["end_date"],
-                    score=body["score"],
-                    dimension_scores=body["dimension_scores"],
-                    behavior_stats=body["behavior_stats"],
-                    abnormal_behaviors=body["abnormal_behaviors"],
+                    employee_no=body.employee_no,
+                    start_date=body.start_date,
+                    end_date=body.end_date,
+                    score=body.score,
+                    dimension_scores=body.dimension_scores,
+                    behavior_stats=body.behavior_stats,
+                    abnormal_behaviors=body.abnormal_behaviors,
                 )
             except RuntimeError as e:
                 logger.error(
@@ -452,62 +429,26 @@ async def diagnosis_summary(request: Request):
 
 # ==================== 词库配置同步接口 ====================
 
-@router.post("/api/v1/internal/config/sync")
-async def config_sync(request: Request):
+@router.post(
+    "/api/v1/internal/config/sync",
+    response_model=ConfigSyncResponse,
+)
+async def config_sync(body: ConfigSyncRequest):
     """
     词库配置同步接口（主网关广播用）
     处理流程：
-    ① 入参校验，config_type不是KEYWORD直接返回400
+    ① FastAPI自动校验请求体（Pydantic模型：config_type必须为KEYWORD、版本号必填、items至少1项）
     ② 版本号校验：传入版本低于当前生效版本，直接返回成功
     ③ 配置内容本地缓存到内存+本地JSON文件
     ④ 更新LLM推理模块的词库引用，实时生效
     ⑤ 返回同步结果
     """
-    # 解析请求体
-    try:
-        body = await request.json()
-    except Exception:
-        raise ComputeException(
-            code=ErrorCode.BAD_REQUEST,
-            msg="请求体JSON格式错误",
-            request_id="",
-        )
-
-    # ========== ① 入参校验 ==========
-    config_type = body.get("config_type", "")
-    config_version = body.get("config_version", "")
-    items = body.get("items", [])
-
-    # config_type必须为KEYWORD
-    if config_type != ConfigType.KEYWORD:
-        raise ComputeException(
-            code=ErrorCode.BAD_REQUEST,
-            msg=f"{ErrorMsg.CONFIG_TYPE_INVALID}: 期望KEYWORD，实际{config_type}",
-            request_id="",
-        )
-
-    # 版本号不能为空
-    if not config_version:
-        raise ComputeException(
-            code=ErrorCode.BAD_REQUEST,
-            msg="配置版本号不能为空",
-            request_id="",
-        )
-
-    # items必须为列表
-    if not isinstance(items, list):
-        raise ComputeException(
-            code=ErrorCode.BAD_REQUEST,
-            msg="配置明细items必须为数组",
-            request_id="",
-        )
-
     # ========== ② 版本号校验 ==========
     current_version = keyword_config_manager.get_current_version()
-    if current_version and config_version <= current_version:
+    if current_version and body.config_version <= current_version:
         logger.info(
             f"词库配置版本未更新，跳过同步 | "
-            f"当前版本={current_version} | 传入版本={config_version}"
+            f"当前版本={current_version} | 传入版本={body.config_version}"
         )
         return {
             "code": 200,
@@ -519,10 +460,13 @@ async def config_sync(request: Request):
         }
 
     # ========== ③④ 同步配置（内存+文件+实时生效） ==========
+    # 将Pydantic模型中的items转为dict列表供keyword_config_manager使用
+    items_dicts = [item.model_dump() for item in body.items]
+
     success = keyword_config_manager.sync_config(
-        config_type=config_type,
-        config_version=config_version,
-        items=items,
+        config_type=body.config_type,
+        config_version=body.config_version,
+        items=items_dicts,
     )
 
     if not success:
