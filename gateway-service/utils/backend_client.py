@@ -9,6 +9,8 @@
 6. 内置完整日志记录：请求URL、方法、请求体、响应状态码、响应体、耗时、错误信息
 
 使用示例：
+    from utils import BackendClient  # 或 from utils.backend_client import BackendClient
+
     # 初始化（在FastAPI lifespan中调用）
     client = BackendClient()
     await client.initialize()
@@ -34,6 +36,7 @@
     # 关闭（在FastAPI shutdown中调用）
     await client.close()
 """
+import asyncio
 import time
 from typing import Any, Dict, Optional
 
@@ -49,6 +52,9 @@ from config import (
     BACKEND_RETRY_DELAYS,
     BACKEND_HTTP_MAX_CONNECTIONS,
     BACKEND_HTTP_MAX_KEEPALIVE_CONNECTIONS,
+    DEVICE_EVENT_FORWARD_PATH,
+    DEVICE_EVENT_FORWARD_MAX_RETRIES,
+    DEVICE_EVENT_FORWARD_RETRY_INTERVAL,
 )
 
 
@@ -238,6 +244,156 @@ class BackendClient:
             timeout=timeout,
         )
 
+    # ==================== 硬件状态透传方法 ====================
+
+    async def forward_device_event(self, event_data: dict) -> bool:
+        """
+        透传硬件状态到后端（异步，不阻塞主事件循环）
+
+        核心原则（强制透传规则，违反会导致后端状态错乱）：
+        - 不能修改reportTime，必须保留硬件的原始上报时间
+        - 不能新增任何字段（比如算法的receiveTime、requestId）
+        - 不能删除任何字段（哪怕后端暂时不用）
+        - 不能修改payload内部的任何字段和值
+
+        重试机制：
+        - 最多重试2次，间隔1秒
+        - 仅对5xx错误、网络超时、连接失败重试
+        - 4xx错误不重试
+        - 重试时保持原始event_data完全不变，不生成新的ID
+
+        Args:
+            event_data: 硬件上报的原始数据字典，包含deviceNo/eventType/reportTime/payload
+
+        Returns:
+            True: 转发成功（后端返回2xx）
+            False: 转发失败（重试耗尽、4xx错误、客户端未初始化）
+        """
+        # 前置检查：客户端是否可用
+        if not self._initialized or self._client is None or self._client.is_closed:
+            logger.error(
+                f"硬件状态转发失败 | 原因=后端客户端未初始化或已关闭 | "
+                f"原始数据={event_data}"
+            )
+            return False
+
+        # 提取关键业务字段用于日志（不修改原始数据）
+        device_no = event_data.get("deviceNo", "未知")
+        event_type = event_data.get("eventType", "未知")
+        report_time = event_data.get("reportTime", "未知")
+
+        start_time = time.time()
+        last_error: Optional[Exception] = None
+
+        # 重试循环：1次首次 + N次重试
+        for attempt in range(1 + DEVICE_EVENT_FORWARD_MAX_RETRIES):
+            try:
+                # 直接透传原始数据，不添加任何额外字段（无幂等键、无receiveTime）
+                response = await self._client.post(
+                    url=DEVICE_EVENT_FORWARD_PATH,
+                    json=event_data,
+                )
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+
+                # 2xx 成功
+                if 200 <= response.status_code < 300:
+                    logger.info(
+                        f"硬件状态转发后端成功 | "
+                        f"deviceNo={device_no} | eventType={event_type} | "
+                        f"reportTime={report_time} | 耗时={elapsed_ms}ms"
+                    )
+                    return True
+
+                # 4xx 客户端错误 - 不重试
+                elif 400 <= response.status_code < 500:
+                    error_body = response.text[:500]
+                    logger.error(
+                        f"硬件状态转发后端客户端错误(不重试) | "
+                        f"deviceNo={device_no} | eventType={event_type} | "
+                        f"reportTime={report_time} | "
+                        f"状态码={response.status_code} | 响应={error_body} | "
+                        f"耗时={elapsed_ms}ms | 原始数据={event_data}"
+                    )
+                    return False
+
+                # 5xx 服务端错误 - 触发重试
+                else:
+                    error_body = response.text[:500]
+                    last_error = httpx.HTTPStatusError(
+                        f"后端服务端错误: HTTP {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                    logger.warning(
+                        f"硬件状态转发后端服务端错误(将重试) | "
+                        f"deviceNo={device_no} | eventType={event_type} | "
+                        f"reportTime={report_time} | "
+                        f"状态码={response.status_code} | 响应={error_body} | "
+                        f"重试次数={attempt + 1}/{DEVICE_EVENT_FORWARD_MAX_RETRIES} | "
+                        f"耗时={elapsed_ms}ms"
+                    )
+
+            except httpx.TimeoutException as e:
+                # 请求超时 - 触发重试
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                last_error = e
+                logger.warning(
+                    f"硬件状态转发后端超时(将重试) | "
+                    f"deviceNo={device_no} | eventType={event_type} | "
+                    f"reportTime={report_time} | "
+                    f"超时类型={type(e).__name__} | "
+                    f"重试次数={attempt + 1}/{DEVICE_EVENT_FORWARD_MAX_RETRIES} | "
+                    f"耗时={elapsed_ms}ms"
+                )
+
+            except httpx.ConnectError as e:
+                # 连接失败 - 触发重试
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                last_error = e
+                logger.warning(
+                    f"硬件状态转发后端连接失败(将重试) | "
+                    f"deviceNo={device_no} | eventType={event_type} | "
+                    f"reportTime={report_time} | "
+                    f"错误={str(e)[:200]} | "
+                    f"重试次数={attempt + 1}/{DEVICE_EVENT_FORWARD_MAX_RETRIES} | "
+                    f"耗时={elapsed_ms}ms"
+                )
+
+            except Exception as e:
+                # 其他未知异常 - 触发重试
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                last_error = e
+                logger.warning(
+                    f"硬件状态转发后端异常(将重试) | "
+                    f"deviceNo={device_no} | eventType={event_type} | "
+                    f"reportTime={report_time} | "
+                    f"异常={type(e).__name__}: {str(e)[:200]} | "
+                    f"重试次数={attempt + 1}/{DEVICE_EVENT_FORWARD_MAX_RETRIES} | "
+                    f"耗时={elapsed_ms}ms"
+                )
+
+            # 重试前等待（固定间隔），最后一次失败不需要等待
+            if attempt < DEVICE_EVENT_FORWARD_MAX_RETRIES:
+                logger.info(
+                    f"硬件状态转发等待重试 | "
+                    f"deviceNo={device_no} | 等待={DEVICE_EVENT_FORWARD_RETRY_INTERVAL}s"
+                )
+                await asyncio.sleep(DEVICE_EVENT_FORWARD_RETRY_INTERVAL)
+
+        # 所有重试均失败
+        total_ms = int((time.time() - start_time) * 1000)
+        logger.error(
+            f"硬件状态转发后端失败(重试耗尽) | "
+            f"deviceNo={device_no} | eventType={event_type} | "
+            f"reportTime={report_time} | "
+            f"重试次数={DEVICE_EVENT_FORWARD_MAX_RETRIES} | 总耗时={total_ms}ms | "
+            f"最后错误={type(last_error).__name__ if last_error else '未知'}: "
+            f"{str(last_error)[:200] if last_error else ''} | "
+            f"完整原始数据={event_data}"
+        )
+        return False
+
     # ==================== 统一请求核心实现 ====================
 
     async def _request(
@@ -405,7 +561,6 @@ class BackendClient:
             if attempt < BACKEND_MAX_RETRIES:
                 delay = BACKEND_RETRY_DELAYS[attempt] if attempt < len(BACKEND_RETRY_DELAYS) else BACKEND_RETRY_DELAYS[-1]
                 logger.info(f"后端请求等待重试 | 等待={delay}s | 幂等键={idempotency_key}")
-                import asyncio
                 await asyncio.sleep(delay)
 
         # 所有重试均失败

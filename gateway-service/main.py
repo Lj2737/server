@@ -27,6 +27,9 @@ from config import (
     PIPER_TARGET_CHANNELS,
     WS_HEARTBEAT_INTERVAL,
     WS_HEARTBEAT_FAIL_THRESHOLD,
+    DEVICE_STATUS_CACHE_TTL,
+    DEVICE_STATUS_CLEANUP_INTERVAL,
+    DEVICE_EVENT_FORWARD_PATH,
 )
 from logger import setup_logger
 from router import router, behavior_callback
@@ -46,6 +49,12 @@ from duty_broadcast_router import (
     duty_broadcast_router,
     piper_tts_manager,
     ws_device_manager,
+)
+# 硬件状态上报模块
+from hardware_router import (
+    hardware_router,
+    device_status_cache,
+    initialize_forward as hardware_initialize_forward,
 )
 
 
@@ -152,12 +161,34 @@ async def lifespan(app: FastAPI):
         f"失败阈值={WS_HEARTBEAT_FAIL_THRESHOLD}"
     )
 
+    # ========== 硬件状态上报 ==========
+    device_status_cache.initialize()
+    await device_status_cache.start_cleanup()
+    logger.info(
+        f"设备状态缓存已启动 | "
+        f"缓存过期时间={DEVICE_STATUS_CACHE_TTL}s | "
+        f"清理间隔={DEVICE_STATUS_CLEANUP_INTERVAL}s"
+    )
+
+    # ========== 硬件状态透传后端 ==========
+    # 注入BackendClient到硬件路由模块，用于异步透传硬件状态到后端
+    hardware_initialize_forward(backend_client=backend_client)
+    logger.info(
+        f"硬件状态透传后端已初始化 | "
+        f"透传路径={DEVICE_EVENT_FORWARD_PATH}"
+    )
+
     logger.info("主网关节点启动完成，开始接收请求")
 
     yield  # 应用运行中，接收并处理请求
 
     # ========== 关闭阶段 ==========
     logger.info("主网关节点关闭中...")
+
+    # 关闭设备状态缓存（停止定时清理）
+    await device_status_cache.stop_cleanup()
+    device_status_cache.clear_all()
+    logger.info("设备状态缓存已关闭")
 
     # 关闭WebSocket设备管理器（停止心跳 + 关闭所有设备连接）
     await ws_device_manager.stop_heartbeat()
@@ -195,7 +226,7 @@ app = FastAPI(
         "部署架构：1台主树莓派（网关） + 4台从树莓派（算力）\n"
         "值班播报：本地Piper TTS + WebSocket流式推送"
     ),
-    version="3.0.0",
+    version="4.1.0",
     lifespan=lifespan,
 )
 
@@ -208,7 +239,10 @@ app.include_router(backend_router)
 # 注册路由 - 值班播报新架构（Piper TTS本地合成 + WebSocket推送）
 app.include_router(duty_broadcast_router)
 
-# 注册全局异常处理器（顺序：先具体后通用）
+# 注册路由 - 硬件状态上报
+app.include_router(hardware_router)
+
+# 注册全局异常处理器
 app.add_exception_handler(GatewayException, gateway_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)

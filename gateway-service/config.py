@@ -225,3 +225,31 @@ WS_PING_TIMEOUT: float = 5.0
 BROADCAST_DEVICE_NO_MAX_LENGTH: int = 20
 # 播报内容最大字数
 BROADCAST_CONTENT_MAX_LENGTH: int = 200
+
+# ==================== 硬件状态上报配置 ====================
+# 设备编号最大长度（与播报共用，但此处单独声明便于理解）
+DEVICE_NO_MAX_LENGTH: int = 20
+# 设备编号正则：仅支持字母、数字、下划线
+DEVICE_NO_PATTERN: str = r"^[a-zA-Z0-9_]+$"
+# 电量百分比取值范围
+BATTERY_LEVEL_MIN: int = 0
+BATTERY_LEVEL_MAX: int = 100
+# 信号等级取值范围
+SIGNAL_LEVEL_MIN: int = 0
+SIGNAL_LEVEL_MAX: int = 5
+
+# ==================== 设备状态缓存配置 ====================
+# 设备状态缓存过期时间（秒），超过此时间未上报的设备自动从缓存删除
+# 约定：后端默认超过5分钟未收到心跳判定设备离线，此处设10分钟留余量
+DEVICE_STATUS_CACHE_TTL: int = 600       # 10分钟
+# 缓存定时清理间隔（秒），每60秒清理一次过期设备
+DEVICE_STATUS_CLEANUP_INTERVAL: int = 60
+
+# ==================== 硬件状态透传后端配置 ====================
+# 算法→后端透传接口路径：POST /internal/badge/ai/device-events
+# 核心原则：算法仅做透传
+DEVICE_EVENT_FORWARD_PATH: str = "/internal/badge/ai/device-events"
+# 透传最大重试次数（不含首次请求，最多重试2次）
+DEVICE_EVENT_FORWARD_MAX_RETRIES: int = 2
+# 透传重试间隔（秒），固定1秒
+DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = 1.0
