@@ -62,9 +62,10 @@ from config import (
 )
 from device_status_cache import DeviceStatusCache
 from utils import BackendClient
+from raw_audio_router import raw_audio_router
 
 
-# ==================== 枚举定义（对齐v4.1文档7.1节） ====================
+# ==================== 枚举定义 ====================
 
 class EventType:
     """事件类型枚举"""
@@ -73,13 +74,11 @@ class EventType:
 
 
 class AlarmCode:
-    """告警编码枚举"""
     MIC_ERROR = "MIC_ERROR"                   # 麦克风异常
     AUDIO_UPLOAD_FAILED = "AUDIO_UPLOAD_FAILED"  # 音频上传失败
 
 
 class AlarmStatus:
-    """告警状态枚举"""
     ACTIVE = "ACTIVE"         # 告警产生
     RECOVERED = "RECOVERED"   # 告警恢复
 
@@ -242,6 +241,9 @@ hardware_router = APIRouter(
     tags=["硬件状态上报接口"],
 )
 
+# 注册原始异常语音上传子路由（共享 /internal/badge/hardware 前缀）
+hardware_router.include_router(raw_audio_router)
+
 # 设备状态缓存单例
 device_status_cache = DeviceStatusCache()
 
@@ -301,7 +303,6 @@ async def _forward_device_event_task(event_data: dict) -> None:
             )
 
     except Exception as e:
-        # 终极兜底：任何未预料的异常都不能抛到主事件循环
         logger.error(
             f"硬件状态透传任务异常(终极兜底) | "
             f"deviceNo={device_no} | eventType={event_type} | "
@@ -317,7 +318,6 @@ async def _forward_device_event_task(event_data: dict) -> None:
 async def receive_device_event(request: DeviceEventRequest):
     """
     接收硬件设备事件上报（心跳/告警）
-
 
     - 硬件按约定频率产生心跳状态时调用
     - 设备产生或恢复硬件告警时立即调用
@@ -372,7 +372,6 @@ async def receive_device_event(request: DeviceEventRequest):
             f"缓存设备数={device_status_cache.get_device_count()}"
         )
     except Exception as e:
-        # 缓存失败不影响返回，仅记录日志
         logger.error(
             f"硬件状态缓存失败（不影响接收响应）| request_id={request_id} | "
             f"deviceNo={device_no} | 错误={str(e)[:200]}"

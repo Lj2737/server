@@ -30,6 +30,7 @@ from config import (
     DEVICE_STATUS_CACHE_TTL,
     DEVICE_STATUS_CLEANUP_INTERVAL,
     DEVICE_EVENT_FORWARD_PATH,
+    RAW_AUDIO_TEMP_DIR,
 )
 from logger import setup_logger
 from router import router, behavior_callback
@@ -55,6 +56,11 @@ from hardware_router import (
     hardware_router,
     device_status_cache,
     initialize_forward as hardware_initialize_forward,
+)
+# 原始异常语音上传模块
+from raw_audio_router import (
+    audio_temp_manager,
+    initialize as raw_audio_initialize,
 )
 
 
@@ -178,12 +184,28 @@ async def lifespan(app: FastAPI):
         f"透传路径={DEVICE_EVENT_FORWARD_PATH}"
     )
 
+    # ========== 原始异常语音上传 ==========
+    # 初始化临时文件管理器（自动创建目录、启动定时清理）
+    await audio_temp_manager.initialize()
+    logger.info(
+        f"原始音频临时文件管理器已初始化 | "
+        f"临时目录={RAW_AUDIO_TEMP_DIR}"
+    )
+
+    # 初始化原始异常语音上传模块
+    raw_audio_initialize()
+    logger.info("原始异常语音上传模块已初始化")
+
     logger.info("主网关节点启动完成，开始接收请求")
 
     yield  # 应用运行中，接收并处理请求
 
     # ========== 关闭阶段 ==========
     logger.info("主网关节点关闭中...")
+
+    # 关闭原始音频临时文件管理器（停止定时清理）
+    await audio_temp_manager.close()
+    logger.info("原始音频临时文件管理器已关闭")
 
     # 关闭设备状态缓存（停止定时清理）
     await device_status_cache.stop_cleanup()
@@ -226,7 +248,7 @@ app = FastAPI(
         "部署架构：1台主树莓派（网关） + 4台从树莓派（算力）\n"
         "值班播报：本地Piper TTS + WebSocket流式推送"
     ),
-    version="4.1.0",
+    version="4.2.0",
     lifespan=lifespan,
 )
 

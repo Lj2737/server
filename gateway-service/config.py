@@ -253,3 +253,19 @@ DEVICE_EVENT_FORWARD_PATH: str = "/internal/badge/ai/device-events"
 DEVICE_EVENT_FORWARD_MAX_RETRIES: int = 2
 # 透传重试间隔（秒），固定1秒
 DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = 1.0
+
+# ==================== 原始异常语音上传配置 ====================
+# 原始音频临时文件存放目录（与异常音频片段分开存储）
+RAW_AUDIO_TEMP_DIR: str = "temp/raw_uploads"
+# 原始音频文件最大允许大小（字节），默认10MB
+RAW_AUDIO_MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
+# 临时文件过期时间（秒），超过此时间的文件将被清理
+RAW_AUDIO_TEMP_FILE_TTL: int = 3600       # 1小时
+# 定时清理间隔（秒），每小时清理一次
+RAW_AUDIO_CLEANUP_INTERVAL: int = 3600
+# metadata JSON字段最大长度（字符数），防止恶意大JSON
+RAW_AUDIO_METADATA_MAX_LENGTH: int = 4096
+# WAV音频文件头魔数（RIFF）
+WAV_HEADER_MAGIC: bytes = b"RIFF"
+# 算力节点行为识别转发超时时间（秒），音频推理耗时较长
+RAW_AUDIO_FORWARD_TIMEOUT: float = 30.0
