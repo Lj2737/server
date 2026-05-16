@@ -2,40 +2,45 @@
 智能胸牌服务管理系统 - 语音行为识别结果回调后端
 核心功能：
 1. 接收主网关从算力节点拿到的行为识别推理结果
-2. 按v3文档要求的格式封装请求体
+2. 按v3.1文档要求的格式封装请求体（multipart/form-data）
 3. 通过BackendClient主动回调后端接口
-4. 异常音频片段传递预留（对接后续录音上传模块）
+4. 异常行为片段录音合并到同一请求中上传（v3.1变更：不再单独调用录音上传接口）
 
-对应v3文档接口：POST /internal/badge/ai/voice-behaviors
-Content-Type: application/json
+v3.1变更说明：
+- 接口路径：POST /badge/v1/internal/ai/voice-behaviors
+- Content-Type：multipart/form-data（不再是application/json）
+- 表单字段：metadata（JSON字符串）+ file（异常行为片段录音，ABNORMAL必传）
+- 废弃：独立的录音上传接口 POST /badge/v1/internal/ai/recordings
+
+对应v3.1文档接口：POST /badge/v1/internal/ai/voice-behaviors
+Content-Type: multipart/form-data
 
 处理流程（严格按顺序）：
     步骤1：接收算力节点返回的推理结果（data字段）
     步骤2：调用IdGenerator生成全局唯一eventId
     步骤3：调用TimeFormatter格式化eventTime
-    步骤4：按v3文档封装请求体（仅保留必传字段，禁止冗余）
-    步骤5：调用BackendClient发送POST到后端
-    步骤6：回调成功后传递eventId和abnormal_audio_clip给录音上传模块（预留）
+    步骤4：按v3.1文档封装metadata JSON（eventTime、deviceNo、behaviorType、summary）
+    步骤5：判断behaviorType是否为ABNORMAL，若是则附加异常音频文件
+    步骤6：调用BackendClient发送multipart/form-data到后端
     步骤7：回调失败记录完整日志，不影响主网关运行
 
-请求体固定格式：
+metadata格式（v3.1文档5.2节）：
     {
-        "eventId": "AI_BEHAVIOR_20260508103100_001234",
         "eventTime": "2026-05-08 10:31:00",
         "deviceNo": "BADGE0001",
-        "behaviorType": "STANDARD / ABNORMAL / CUSTOMER",
-        "summary": "行为摘要文本"
+        "behaviorType": "ABNORMAL",
+        "summary": "员工未按SOP回应顾客问题"
     }
 
 使用示例：
     from behavior_callback import BehaviorCallback
     from utils import BackendClient
 
-    # 初始化（在FastAPI lifespan startup中调用）
+    # 初始化
     callback = BehaviorCallback()
     callback.initialize(backend_client=BackendClient())
 
-    # 触发回调（由router在推理成功后调用，fire-and-forget）
+    # 触发回调
     import asyncio
     asyncio.create_task(callback.handle_result(
         inference_data={
@@ -47,15 +52,10 @@ Content-Type: application/json
         device_no="BADGE0001",
         event_time="2026-05-08 10:30:00",
     ))
-
-    # 注册异常音频片段处理器（对接录音上传模块时使用）
-    async def my_audio_handler(event_id: str, audio_clip: str):
-        # 录音上传模块的具体实现
-        pass
-    callback.register_audio_clip_handler(my_audio_handler)
 """
-import asyncio
-from typing import Any, Awaitable, Callable, Dict, Optional
+import base64
+import json
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
@@ -69,9 +69,9 @@ class BehaviorCallback:
 
     职责：
     - 接收算力节点返回的行为识别推理结果
-    - 封装成v3文档要求的格式
-    - 主动回调后端 POST /internal/badge/ai/voice-behaviors
-    - 异常音频片段传递预留（register_audio_clip_handler）
+    - 封装成v3.1文档要求的multipart/form-data格式
+    - 主动回调后端 POST /badge/v1/internal/ai/voice-behaviors
+    - 异常行为片段录音合并到同一请求中上传
 
     设计约束：
     - 全异步实现，不阻塞主网关路由转发
@@ -94,8 +94,6 @@ class BehaviorCallback:
         if hasattr(self, "_initialized") and self._initialized:
             return
         self._backend_client: Optional[BackendClient] = None
-        # 异常音频片段处理器（预留，对接录音上传模块）
-        self._audio_clip_handler: Optional[Callable[[str, str], Awaitable[None]]] = None
         self._initialized = False
 
     def initialize(self, backend_client: BackendClient) -> None:
@@ -112,30 +110,9 @@ class BehaviorCallback:
         self._initialized = True
         logger.info(
             f"行为识别回调处理器初始化完成 | "
-            f"回调路径={BEHAVIOR_CALLBACK_PATH}"
+            f"回调路径={BEHAVIOR_CALLBACK_PATH} | "
+            f"Content-Type=multipart/form-data（v3.1）"
         )
-
-    def register_audio_clip_handler(
-        self, handler: Callable[[str, str], Awaitable[None]]
-    ) -> None:
-        """
-        注册异常音频片段处理器
-        用于对接后续的录音上传模块，当行为识别结果为ABNORMAL且包含音频片段时调用
-
-        Args:
-            handler: 异步回调函数
-                     参数1: event_id (str) - 行为识别的eventId
-                     参数2: abnormal_audio_clip (str) - 异常音频Base64数据
-
-        示例：
-            async def handle_audio_clip(event_id: str, audio_clip: str):
-                # 调用录音上传模块
-                await upload_recording(event_id, audio_clip)
-
-            callback.register_audio_clip_handler(handle_audio_clip)
-        """
-        self._audio_clip_handler = handler
-        logger.info("异常音频片段处理器已注册")
 
     # ==================== 核心回调方法 ====================
 
@@ -149,6 +126,10 @@ class BehaviorCallback:
         处理行为识别推理结果，回调后端
         完整实现步骤1~7，由router通过asyncio.create_task异步调用
 
+        v3.1变更：异常行为片段录音合并到voice-behaviors请求中
+        - ABNORMAL行为：metadata + file（异常音频片段）
+        - STANDARD/CUSTOMER行为：仅metadata，无file
+
         Args:
             inference_data: 算力节点返回的data字段
                 {
@@ -158,8 +139,7 @@ class BehaviorCallback:
                     "abnormal_audio_clip": "UklGRi4AAABX..."  # 可选，仅ABNORMAL时
                 }
             device_no: 设备编号（从原始请求的device_no字段提取）
-            event_time: 行为发生时间（从原始请求的event_time字段提取，
-                        格式yyyy-MM-dd HH:mm:ss，为空时使用当前时间）
+            event_time: 行为发生时间（从原始请求的event_time字段提取）
         """
         if not self._initialized or self._backend_client is None:
             logger.error("行为识别回调处理器未初始化，跳过回调")
@@ -171,19 +151,19 @@ class BehaviorCallback:
         # ========== 步骤3：调用TimeFormatter格式化eventTime ==========
         formatted_time = self._format_event_time(event_time)
 
-        # ========== 步骤4：按v3文档封装请求体（仅必传字段） ==========
+        # ========== 步骤4：按v3.1文档封装metadata JSON ==========
         behavior_type = self._validate_behavior_type(
             inference_data.get("behavior_type", BehaviorType.STANDARD)
         )
         summary = inference_data.get("summary", "")
 
-        callback_body = {
-            "eventId": event_id,
+        metadata = {
             "eventTime": formatted_time,
             "deviceNo": device_no,
             "behaviorType": behavior_type,
             "summary": summary,
         }
+        metadata_json = json.dumps(metadata, ensure_ascii=False)
 
         logger.info(
             f"行为识别回调开始 | eventId={event_id} | "
@@ -191,13 +171,58 @@ class BehaviorCallback:
             f"eventTime={formatted_time}"
         )
 
-        # ========== 步骤5：调用BackendClient发送POST到后端 ==========
+        # ========== 步骤5：判断是否为ABNORMAL，附加异常音频文件 ==========
+        files = None
+        abnormal_audio_clip = inference_data.get("abnormal_audio_clip")
+
+        if behavior_type == BehaviorType.ABNORMAL and abnormal_audio_clip:
+            try:
+                # base64解码异常音频片段
+                audio_bytes = base64.b64decode(abnormal_audio_clip)
+                files = {
+                    "file": (
+                        f"{event_id}.wav",   # 文件名
+                        audio_bytes,          # 文件字节
+                        "audio/wav",          # Content-Type
+                    ),
+                }
+                logger.info(
+                    f"异常行为音频片段已附加 | eventId={event_id} | "
+                    f"音频大小={len(audio_bytes) / 1024:.1f}KB"
+                )
+            except Exception as e:
+                logger.error(
+                    f"异常音频base64解码失败 | eventId={event_id} | "
+                    f"错误类型={type(e).__name__} | 错误={str(e)[:200]}"
+                )
+                # ABNORMAL但没有有效音频，仍发送metadata（由后端判断）
+                # v3.1文档：ABNORMAL必须上传file，否则后端返回"异常行为必须上传语音内容"
+                # 这里我们尽力发送，如果解码失败记录日志但继续发送
+
+        # ========== 步骤6：调用BackendClient发送multipart/form-data到后端 ==========
+        data = {
+            "metadata": metadata_json,
+        }
+
         try:
-            result = await self._backend_client.post(
-                path=BEHAVIOR_CALLBACK_PATH,
-                json_body=callback_body,
-                idempotency_key=event_id,  # 重试时保持同一eventId
-            )
+            if files:
+                # ABNORMAL：metadata + file
+                result = await self._backend_client.post_multipart(
+                    path=BEHAVIOR_CALLBACK_PATH,
+                    files=files,
+                    data=data,
+                    idempotency_key=event_id,
+                )
+            else:
+                # STANDARD/CUSTOMER：仅metadata（使用multipart发送，但无file）
+                # v3.1文档：STANDARD和CUSTOMER不上传file
+                # 但接口统一使用multipart/form-data
+                result = await self._backend_client.post_multipart(
+                    path=BEHAVIOR_CALLBACK_PATH,
+                    files=None,
+                    data=data,
+                    idempotency_key=event_id,
+                )
             logger.info(
                 f"行为识别回调成功 | eventId={event_id} | "
                 f"deviceNo={device_no} | behaviorType={behavior_type} | "
@@ -209,31 +234,6 @@ class BehaviorCallback:
                 f"行为识别回调失败 | eventId={event_id} | "
                 f"deviceNo={device_no} | behaviorType={behavior_type} | "
                 f"错误类型={type(e).__name__} | 错误={str(e)[:300]}"
-            )
-            return  # 不re-raise，不影响主网关运行
-
-        # ========== 步骤6：回调成功后传递abnormal_audio_clip给录音上传模块 ==========
-        abnormal_audio_clip = inference_data.get("abnormal_audio_clip")
-        if (
-            behavior_type == BehaviorType.ABNORMAL
-            and abnormal_audio_clip
-            and self._audio_clip_handler
-        ):
-            try:
-                await self._audio_clip_handler(event_id, abnormal_audio_clip)
-                logger.info(
-                    f"异常音频片段已传递给录音上传模块 | "
-                    f"eventId={event_id} | 音频数据长度={len(abnormal_audio_clip)}字符"
-                )
-            except Exception as e:
-                logger.error(
-                    f"异常音频片段传递失败 | eventId={event_id} | "
-                    f"错误类型={type(e).__name__} | 错误={str(e)[:300]}"
-                )
-        elif behavior_type == BehaviorType.ABNORMAL and abnormal_audio_clip:
-            # 有音频片段但没有注册处理器，记录提示
-            logger.debug(
-                f"异常音频片段未传递（未注册处理器）| eventId={event_id}"
             )
 
     # ==================== 辅助方法 ====================
@@ -247,7 +247,7 @@ class BehaviorCallback:
         - 格式不合法时回退为TimeFormatter.now()当前时间
 
         Args:
-            event_time: 原始事件时间字符串，格式yyyy-MM-dd HH:mm:ss
+            event_time: 原始事件时间字符串
 
         Returns:
             格式化后的事件时间字符串
@@ -270,7 +270,7 @@ class BehaviorCallback:
     def _validate_behavior_type(behavior_type: str) -> str:
         """
         校验behavior_type枚举值
-        - 必须使用v3文档规定的全大写枚举值
+        - 必须使用v3.1文档规定的全大写枚举值
         - 非标准值回退为STANDARD并记录警告日志
 
         Args:
@@ -293,7 +293,3 @@ class BehaviorCallback:
     def is_initialized(self) -> bool:
         """回调处理器是否已初始化"""
         return self._initialized
-
-    def has_audio_clip_handler(self) -> bool:
-        """是否已注册异常音频片段处理器"""
-        return self._audio_clip_handler is not None

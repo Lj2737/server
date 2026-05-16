@@ -204,7 +204,7 @@ class ConfigSyncRequest(BaseModel):
 # ==================== 路由器创建 ====================
 
 backend_router = APIRouter(
-    prefix="/algorithm/badge",
+    prefix="/badge/v1/algorithm",
     tags=["后端调用算法接口"],
 )
 

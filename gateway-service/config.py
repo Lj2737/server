@@ -2,6 +2,18 @@
 智能胸牌服务管理系统 - 主网关节点配置文件
 所有配置项集中管理，禁止硬编码
 适应部署架构：1台主树莓派（网关） + 4台从树莓派（算力）
+
+v3.2更新：
+- 硬件接收路径恢复为 /internal/badge/hardware 前缀（硬件→算法，非算法→后端）
+- 新增算力节点→主网关内部接口路径（dialog-completed、knowledge-base）
+- 新增知识库缓存配置
+- 新增算法查询设备知识库ID接口路径
+- 录音上传接口已废弃（v3.1合并到voice-behaviors，配置项已移除）
+
+v3.1更新：
+- 接口路径统一为 /badge/v1/ 前缀（算法→后端路径）
+- 异常行为片段录音合并到 voice-behaviors 接口（multipart/form-data）
+- 新增 AI对话完成回调接口（dialog-completions）
 """
 from typing import List, Dict
 
@@ -55,7 +67,6 @@ HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS: int = 10
 # 对外接口统一前缀 /api/v1/gateway/，内部统一前缀 /api/v1/internal/inference/
 ROUTE_MAPPING: Dict[str, str] = {
     "/api/v1/gateway/behavior-recognition": "/api/v1/internal/inference/behavior-recognition",
-    "/api/v1/gateway/diagnosis-summary": "/api/v1/internal/inference/diagnosis-summary",
 }
 
 
@@ -96,6 +107,11 @@ class AlarmStatus:
     """告警状态枚举"""
     ACTIVE = "ACTIVE"          # 告警生效
     RECOVERED = "RECOVERED"    # 告警恢复
+
+
+class EventType:
+    HEARTBEAT = "HEARTBEAT"   # 心跳状态
+    ALARM = "ALARM"           # 硬件告警
 
 
 # ==================== 时间格式 ====================
@@ -140,7 +156,7 @@ BACKEND_HTTP_MAX_KEEPALIVE_CONNECTIONS: int = 5
 class BusinessType:
     """幂等ID业务类型枚举"""
     BEHAVIOR = "BEHAVIOR"      # 行为识别事件
-    RECORDING = "RECORDING"    # 录音上传事件
+    RECORDING = "RECORDING"    # 录音上传事件（v3.1已废弃，合并到voice-behaviors）
 
 
 # ==================== 异常音频临时存储配置 ====================
@@ -152,42 +168,63 @@ AUDIO_TEMP_FILE_TTL: int = 3600      # 1小时
 AUDIO_TEMP_CLEANUP_INTERVAL: int = 3600  # 每小时清理一次
 
 
-# ==================== 行为识别回调后端配置 ====================
-# 行为识别结果回调后端接口路径（POST，Content-Type: application/json）
-# 对应v3文档接口：POST /internal/badge/ai/voice-behaviors
-BEHAVIOR_CALLBACK_PATH: str = "/internal/badge/ai/voice-behaviors"
+# ==================== 算法→后端回调接口路径 ====================
+# 语音行为识别结果回调后端接口路径（POST，Content-Type: multipart/form-data）
+# v3.1：异常行为片段录音合并到此接口，ABNORMAL必须上传file字段
+BEHAVIOR_CALLBACK_PATH: str = "/badge/v1/internal/ai/voice-behaviors"
+
+# AI对话完成回调后端接口路径（POST，Content-Type: application/json）
+# v3.1新增接口
+DIALOG_COMPLETION_CALLBACK_PATH: str = "/badge/v1/internal/ai/dialog-completions"
+
+# 录音上传后端接口（v3.1已废弃，异常录音合并到voice-behaviors，v3.2移除配置项）
+# 如需录音上传功能，请使用 BEHAVIOR_CALLBACK_PATH（/badge/v1/internal/ai/voice-behaviors）
 
 
-# ==================== 异常行为片段录音上传配置 ====================
-# 录音上传后端接口路径（POST，Content-Type: multipart/form-data）
-# 对应v3文档接口：POST /internal/badge/ai/recordings
-RECORDING_UPLOAD_PATH: str = "/internal/badge/ai/recordings"
-# 录音上传请求超时时间（秒），文件上传需要更长超时
-RECORDING_UPLOAD_TIMEOUT: float = 30.0
+# ==================== 硬件状态透传后端配置 ====================
+# 算法→后端透传接口路径：POST /badge/v1/internal/ai/device-events
+DEVICE_EVENT_FORWARD_PATH: str = "/badge/v1/internal/ai/device-events"
+# 透传最大重试次数（不含首次请求，最多重试2次）
+DEVICE_EVENT_FORWARD_MAX_RETRIES: int = 2
+# 透传重试间隔（秒），固定1秒
+DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = 1.0
 
+
+# ==================== 算力节点→主网关内部接口路径 ====================
+# AI对话完成内部接口（算力节点调用主网关）
+DIALOG_COMPLETED_INTERNAL_PATH: str = "/api/v1/internal/dialog-completed"
+# 知识库查询内部接口（算力节点调用主网关）
+KNOWLEDGE_BASE_INTERNAL_PATH: str = "/api/v1/internal/knowledge-base"
+
+# ==================== 知识库缓存配置 ====================
+# 知识库ID缓存过期时间（秒），默认24小时
+KNOWLEDGE_BASE_CACHE_TTL: int = 86400  # 24小时
+# 知识库ID缓存清理间隔（秒）
+KNOWLEDGE_BASE_CACHE_CLEANUP_INTERVAL: int = 3600  # 1小时
+
+# ==================== 算法查询设备知识库ID接口路径 ====================
+# 算法查询设备知识库ID接口路径（算法→后端）
+KNOWLEDGE_BASE_QUERY_PATH: str = "/badge/v1/internal/ai/devices/knowledge-base"
 
 # ==================== 功能3：AI时段诊断总结配置 ====================
 # AI诊断请求转发到算力节点的内部路径
-# 算力节点内部接口：POST /api/v1/internal/inference/diagnosis-summary
 DIAGNOSIS_INTERNAL_PATH: str = "/api/v1/internal/inference/diagnosis-summary"
-# AI诊断请求超时时间（秒），LLM推理耗时较长，设置为30秒
-DIAGNOSIS_REQUEST_TIMEOUT: float = 30.0
+# AI诊断请求超时时间（秒），LLM推理耗时较长，设置为60秒
+DIAGNOSIS_REQUEST_TIMEOUT: float = 60.0
 
 
 # ==================== 功能4：词库配置同步配置 ====================
 # 词库配置同步到算力节点的内部路径
-# 算力节点内部接口：POST /api/v1/internal/config/sync
 CONFIG_SYNC_INTERNAL_PATH: str = "/api/v1/internal/config/sync"
 # 词库配置同步请求超时时间（秒）
 CONFIG_SYNC_REQUEST_TIMEOUT: float = 10.0
 
 
 # ==================== 功能5：值班播报文字转语音配置 ====================
-# TTS播报请求转发到算力节点的内部路径（旧架构：转发到算力节点，已废弃）
-# 算力节点内部接口：POST /api/v1/internal/tts/broadcast
-TTS_INTERNAL_PATH: str = "/api/v1/internal/tts/broadcast"
 # TTS播报请求超时时间（秒）
 TTS_REQUEST_TIMEOUT: float = 30.0
+# TTS播报请求转发到算力节点的内部路径
+TTS_INTERNAL_PATH: str = "/api/v1/internal/tts/broadcast"
 
 
 # ==================== Piper TTS本地部署配置 ====================
@@ -203,11 +240,11 @@ PIPER_TARGET_SAMPLE_RATE: int = 16000
 PIPER_TARGET_SAMPLE_WIDTH: int = 2
 # 目标音频声道数，单声道
 PIPER_TARGET_CHANNELS: int = 1
-# Piper合成参数：噪声缩放（控制随机性，0.667为默认值）
+# Piper合成参数：噪声缩放
 PIPER_NOISE_SCALE: float = 0.667
-# Piper合成参数：语速缩放（1.0为正常语速，<1.0加速，>1.0减速）
+# Piper合成参数：语速缩放
 PIPER_LENGTH_SCALE: float = 1.0
-# Piper合成参数：音量倍数（1.0为正常音量，<1.0降低，>1.0增大）
+# Piper合成参数：音量倍数
 PIPER_VOLUME: float = 1.0
 
 
@@ -226,8 +263,9 @@ BROADCAST_DEVICE_NO_MAX_LENGTH: int = 20
 # 播报内容最大字数
 BROADCAST_CONTENT_MAX_LENGTH: int = 200
 
+
 # ==================== 硬件状态上报配置 ====================
-# 设备编号最大长度（与播报共用，但此处单独声明便于理解）
+# 设备编号最大长度
 DEVICE_NO_MAX_LENGTH: int = 20
 # 设备编号正则：仅支持字母、数字、下划线
 DEVICE_NO_PATTERN: str = r"^[a-zA-Z0-9_]+$"
@@ -239,33 +277,24 @@ SIGNAL_LEVEL_MIN: int = 0
 SIGNAL_LEVEL_MAX: int = 5
 
 # ==================== 设备状态缓存配置 ====================
-# 设备状态缓存过期时间（秒），超过此时间未上报的设备自动从缓存删除
-# 约定：后端默认超过5分钟未收到心跳判定设备离线，此处设10分钟留余量
+# 设备状态缓存过期时间（秒）
 DEVICE_STATUS_CACHE_TTL: int = 600       # 10分钟
-# 缓存定时清理间隔（秒），每60秒清理一次过期设备
+# 缓存定时清理间隔（秒）
 DEVICE_STATUS_CLEANUP_INTERVAL: int = 60
 
-# ==================== 硬件状态透传后端配置 ====================
-# 算法→后端透传接口路径：POST /internal/badge/ai/device-events
-# 核心原则：算法仅做透传
-DEVICE_EVENT_FORWARD_PATH: str = "/internal/badge/ai/device-events"
-# 透传最大重试次数（不含首次请求，最多重试2次）
-DEVICE_EVENT_FORWARD_MAX_RETRIES: int = 2
-# 透传重试间隔（秒），固定1秒
-DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = 1.0
 
 # ==================== 原始异常语音上传配置 ====================
-# 原始音频临时文件存放目录（与异常音频片段分开存储）
+# 原始音频临时文件存放目录
 RAW_AUDIO_TEMP_DIR: str = "temp/raw_uploads"
 # 原始音频文件最大允许大小（字节），默认10MB
 RAW_AUDIO_MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
-# 临时文件过期时间（秒），超过此时间的文件将被清理
+# 临时文件过期时间（秒）
 RAW_AUDIO_TEMP_FILE_TTL: int = 3600       # 1小时
-# 定时清理间隔（秒），每小时清理一次
+# 定时清理间隔（秒）
 RAW_AUDIO_CLEANUP_INTERVAL: int = 3600
-# metadata JSON字段最大长度（字符数），防止恶意大JSON
+# metadata JSON字段最大长度（字符数）
 RAW_AUDIO_METADATA_MAX_LENGTH: int = 4096
 # WAV音频文件头魔数（RIFF）
 WAV_HEADER_MAGIC: bytes = b"RIFF"
-# 算力节点行为识别转发超时时间（秒），音频推理耗时较长
+# 算力节点行为识别转发超时时间（秒）
 RAW_AUDIO_FORWARD_TIMEOUT: float = 30.0

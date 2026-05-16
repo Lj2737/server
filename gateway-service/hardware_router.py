@@ -8,14 +8,15 @@
 5. 本地缓存设备最新状态（DeviceStatusCache）
 6. 异步透传原始数据到后端（复用BackendClient，不阻塞硬件响应）
 
-接口规范：
+接口规范（对齐v3.2文档7.1节）：
 - 接口路径：POST /internal/badge/hardware/device-events
 - Content-Type：application/json
 - 入参：{"deviceNo":"BADGE0001","eventType":"HEARTBEAT","reportTime":"...","payload":{...}}
 - 出参：{"code":200,"message":"接收成功","data":{"receiveTime":"..."}}
 
-核心原则：
-- 算法仅做格式校验+缓存+透传，不修改、不新增、不删除硬件上报的任何业务字段
+核心原则（v3.2文档7.1+7.2节）：
+- 算法仅做格式校验+缓存+透传，本地缓存保留原始数据
+- v3.2新增：HEARTBEAT事件转发时将signalLevel(0-5)转换为signalPercent(0-100)，本地缓存保留原始signalLevel
 - 无论后续是否转发后端成功，只要算法成功接收并校验通过，就必须返回code=200
 - 透传后端失败不影响硬件上报接口的返回（硬件永远收到200）
 
@@ -62,23 +63,24 @@ from config import (
 )
 from device_status_cache import DeviceStatusCache
 from utils import BackendClient
-from raw_audio_router import raw_audio_router
 
 
-# ==================== 枚举定义 ====================
+# ==================== 枚举定义（对齐v3.1文档7.1节） ====================
 
 class EventType:
-    """事件类型枚举"""
+    """事件类型枚举（v3.1文档7.1节冻结）"""
     HEARTBEAT = "HEARTBEAT"   # 心跳状态
     ALARM = "ALARM"           # 硬件告警
 
 
 class AlarmCode:
+    """告警编码枚举（v3.1文档7.1.3节冻结）"""
     MIC_ERROR = "MIC_ERROR"                   # 麦克风异常
     AUDIO_UPLOAD_FAILED = "AUDIO_UPLOAD_FAILED"  # 音频上传失败
 
 
 class AlarmStatus:
+    """告警状态枚举（v3.1文档7.1.3节冻结，对齐config.py已有枚举）"""
     ACTIVE = "ACTIVE"         # 告警产生
     RECOVERED = "RECOVERED"   # 告警恢复
 
@@ -88,6 +90,7 @@ class AlarmStatus:
 class HeartbeatPayload(BaseModel):
     """
     HEARTBEAT事件payload模型
+    对齐v3.1文档7.1.2节必传字段
     """
     batteryLevel: int = Field(
         ...,
@@ -108,6 +111,7 @@ class HeartbeatPayload(BaseModel):
 class AlarmPayload(BaseModel):
     """
     ALARM事件payload模型
+    对齐v3.1文档7.1.3节必传字段
     """
     alarmCode: str = Field(
         ...,
@@ -148,6 +152,7 @@ class AlarmPayload(BaseModel):
 class DeviceEventRequest(BaseModel):
     """
     硬件设备事件上报请求体模型
+    对齐v3.1文档7.1节必传字段
 
     硬件 → 算法，Content-Type: application/json
     核心原则：算法仅做格式校验+缓存+透传，不修改业务字段
@@ -241,9 +246,6 @@ hardware_router = APIRouter(
     tags=["硬件状态上报接口"],
 )
 
-# 注册原始异常语音上传子路由（共享 /internal/badge/hardware 前缀）
-hardware_router.include_router(raw_audio_router)
-
 # 设备状态缓存单例
 device_status_cache = DeviceStatusCache()
 
@@ -275,7 +277,7 @@ async def _forward_device_event_task(event_data: dict) -> None:
     - 所有异常都要捕获，不能抛出到主事件循环
 
     Args:
-        event_data: 硬件上报的原始数据字典（与硬件上报完全一致）
+        event_data: 转发到后端的数据字典（HEARTBEAT事件已完成signalLevel→signalPercent转换）
     """
     device_no = event_data.get("deviceNo", "未知")
     event_type = event_data.get("eventType", "未知")
@@ -303,6 +305,7 @@ async def _forward_device_event_task(event_data: dict) -> None:
             )
 
     except Exception as e:
+        # 终极兜底：任何未预料的异常都不能抛到主事件循环
         logger.error(
             f"硬件状态透传任务异常(终极兜底) | "
             f"deviceNo={device_no} | eventType={event_type} | "
@@ -319,15 +322,17 @@ async def receive_device_event(request: DeviceEventRequest):
     """
     接收硬件设备事件上报（心跳/告警）
 
+    对齐v3.2文档7.1节：
     - 硬件按约定频率产生心跳状态时调用
     - 设备产生或恢复硬件告警时立即调用
     - 网络中断恢复后，按时间顺序补传所有缓存的状态数据
 
     核心原则：
-    - 算法仅做格式校验+缓存+透传，不修改、不新增、不删除硬件上报的任何业务字段
+    - 算法仅做格式校验+缓存+透传，本地缓存保留原始数据
+    - v3.2新增：HEARTBEAT事件转发时signalLevel(0-5)→signalPercent(0-100)，本地缓存保留原始signalLevel
     - 无论后续是否转发后端成功，只要算法成功接收并校验通过，就必须返回code=200
 
-    请求体：
+    请求体（对齐v3.2文档7.1节）：
     {
         "deviceNo": "BADGE0001",
         "eventType": "HEARTBEAT",
@@ -335,7 +340,7 @@ async def receive_device_event(request: DeviceEventRequest):
         "payload": {"batteryLevel": 86, "signalLevel": 4}
     }
 
-    成功响应：
+    成功响应（对齐v3.1文档7.1.4节）：
     {
         "code": 200,
         "message": "接收成功",
@@ -362,7 +367,7 @@ async def receive_device_event(request: DeviceEventRequest):
         f"reportTime={report_time}"
     )
 
-    # ========== 缓存设备最新状态 ==========
+    # ========== 缓存设备最新状态（保留原始数据，包含signalLevel） ==========
     try:
         raw_data = request.model_dump()
         device_status_cache.update_device_status(device_no, raw_data)
@@ -372,6 +377,7 @@ async def receive_device_event(request: DeviceEventRequest):
             f"缓存设备数={device_status_cache.get_device_count()}"
         )
     except Exception as e:
+        # 缓存失败不影响返回，仅记录日志
         logger.error(
             f"硬件状态缓存失败（不影响接收响应）| request_id={request_id} | "
             f"deviceNo={device_no} | 错误={str(e)[:200]}"
@@ -379,15 +385,32 @@ async def receive_device_event(request: DeviceEventRequest):
         # 即使缓存失败，也需要raw_data用于透传
         raw_data = request.model_dump()
 
-    # ========== 异步透传原始数据到后端 ==========
+    # ========== 构建透传数据（v3.2：HEARTBEAT事件signalLevel→signalPercent转换） ==========
     # 核心原则：
-    # 1. 算法仅做透传，绝对不修改、不新增、不删除硬件上报的任何业务字段
-    # 2. 后端收到的数据必须与硬件原始上报完全一致
-    # 3. 使用asyncio.create_task创建后台任务，不阻塞主事件循环
-    # 4. 转发失败不影响硬件上报接口的返回（硬件永远收到200）
+    # 1. 本地缓存保留原始signalLevel（硬件上报的0-5整数，用于内部使用）
+    # 2. 转发到后端的数据将signalLevel转换为signalPercent（百分比0-100，signalLevel * 20）
+    # 3. 此转换仅在eventType=HEARTBEAT时执行
+    forward_data = raw_data.copy()
+    if event_type == EventType.HEARTBEAT and "payload" in forward_data:
+        payload = forward_data["payload"].copy()
+        if "signalLevel" in payload:
+            signal_level = payload.pop("signalLevel")
+            signal_percent = signal_level * 20
+            payload["signalPercent"] = signal_percent
+            forward_data["payload"] = payload
+            logger.debug(
+                f"信号等级转换 | request_id={request_id} | "
+                f"deviceNo={device_no} | signalLevel={signal_level} → signalPercent={signal_percent}"
+            )
+
+    # ========== 异步透传数据到后端（对齐v3.1文档7.2节） ==========
+    # 核心原则：
+    # 1. 透传数据已完成signalLevel→signalPercent转换（仅HEARTBEAT事件）
+    # 2. 使用asyncio.create_task创建后台任务，不阻塞主事件循环
+    # 3. 转发失败不影响硬件上报接口的返回（硬件永远收到200）
     try:
         asyncio.create_task(
-            _forward_device_event_task(raw_data),
+            _forward_device_event_task(forward_data),
             name=f"forward-device-event-{device_no}-{event_type}",
         )
         logger.info(
@@ -395,12 +418,14 @@ async def receive_device_event(request: DeviceEventRequest):
             f"deviceNo={device_no} | eventType={event_type}"
         )
     except Exception as e:
+        # 创建任务失败不影响返回，仅记录日志
         logger.error(
             f"硬件状态透传任务创建失败（不影响接收响应）| request_id={request_id} | "
             f"deviceNo={device_no} | 错误={str(e)[:200]}"
         )
 
-    # ========== 返回标准响应 ==========
+    # ========== 返回标准响应（对齐v3.1文档7.1.4节） ==========
+    # 关键规则：只要算法成功接收并校验通过，就必须返回code=200
     elapsed_ms = int((time.time() - start_time) * 1000)
     receive_time = _format_current_time()
 
@@ -418,6 +443,7 @@ async def receive_device_event(request: DeviceEventRequest):
 def _build_success_response(receive_time: str) -> Dict[str, Any]:
     """
     构建硬件上报成功响应体
+    对齐v3.1文档7.1.4节：
     {
         "code": 200,
         "message": "接收成功",

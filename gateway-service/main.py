@@ -3,9 +3,20 @@
 FastAPI实例创建、路由注册、生命周期管理
 对外唯一暴露端口：8090，仅对接后端
 
-值班播报架构：
-- 旧架构（已废弃）：后端→网关→算力节点TTS→返回结果→网关转发给后端
-- 新架构（当前）：后端→网关本地Piper TTS合成→WebSocket流式推送胸牌→返回success
+v3.2架构变更：
+- WebSocket端点从 /badge/v1/algorithm/ws/device/{deviceNo} 迁移到 /ws/device/{deviceNo}（根路径）
+- 新增算力节点→主网关内部接口：dialog-completed、knowledge-base
+- 新增知识库ID本地缓存（24小时TTL）
+- 新增BackendClient便捷方法：report_dialog_completion、get_knowledge_base_id
+
+值班播报架构（v9原版）：
+- 后端→网关调用Piper本地TTS合成→WebSocket流式推送胸牌→返回success
+
+硬件状态上报架构（v3.1）：
+- 硬件→算法：POST /badge/v1/internal/hardware/device-events（格式校验+缓存+透传）
+- 算法→后端：POST /badge/v1/internal/ai/device-events（异步透传原始数据，不阻塞硬件响应）
+- 算法仅做格式校验+缓存+透传，不修改、不新增、不删除硬件上报的任何业务字段
+- 透传失败不影响硬件上报接口的返回（硬件永远收到200）
 """
 from contextlib import asynccontextmanager
 
@@ -18,36 +29,34 @@ from config import (
     GATEWAY_PORT,
     BACKEND_BASE_URL,
     BEHAVIOR_CALLBACK_PATH,
-    RECORDING_UPLOAD_PATH,
+    DIAGNOSIS_REQUEST_TIMEOUT,
     DIAGNOSIS_INTERNAL_PATH,
     CONFIG_SYNC_INTERNAL_PATH,
-    PIPER_MODEL_PATH,
-    PIPER_TARGET_SAMPLE_RATE,
-    PIPER_TARGET_SAMPLE_WIDTH,
-    PIPER_TARGET_CHANNELS,
     WS_HEARTBEAT_INTERVAL,
     WS_HEARTBEAT_FAIL_THRESHOLD,
     DEVICE_STATUS_CACHE_TTL,
     DEVICE_STATUS_CLEANUP_INTERVAL,
     DEVICE_EVENT_FORWARD_PATH,
     RAW_AUDIO_TEMP_DIR,
+    KNOWLEDGE_BASE_CACHE_TTL,
+    KNOWLEDGE_BASE_CACHE_CLEANUP_INTERVAL,
 )
 from logger import setup_logger
-from router import router, behavior_callback
+from router import router, behavior_callback, initialize_dialog_callback
 from backend_router import backend_router, diagnosis_handler, config_sync_handler
-from recording_upload import RecordingUpload
 from node_manager import NodeManager
 from http_client import HttpClientSingleton
-from utils import BackendClient, AudioTempStorage
+from utils import BackendClient
 from exception import (
     global_exception_handler,
     validation_exception_handler,
     gateway_exception_handler,
     GatewayException,
 )
-# 值班播报新架构模块
+# 值班播报模块（Piper本地TTS + WebSocket推送）
 from duty_broadcast_router import (
     duty_broadcast_router,
+    ws_router,
     piper_tts_manager,
     ws_device_manager,
 )
@@ -62,6 +71,9 @@ from raw_audio_router import (
     audio_temp_manager,
     initialize as raw_audio_initialize,
 )
+# 知识库缓存模块
+from knowledge_base_cache import KnowledgeBaseCache
+from router import knowledge_base_cache as router_knowledge_base_cache
 
 
 @asynccontextmanager
@@ -71,10 +83,11 @@ async def lifespan(app: FastAPI):
     使用asynccontextmanager实现startup/shutdown两个阶段
 
     - startup：初始化日志系统、预建httpx连接池、启动算力节点健康检查、
-              初始化后端客户端、初始化音频临时存储、
-              加载Piper TTS模型、启动WebSocket设备心跳
-    - shutdown：停止心跳、关闭TTS模型、关闭所有WebSocket连接、
-               停止健康检查、关闭httpx连接池、关闭后端客户端、关闭音频临时存储
+              初始化后端客户端、初始化行为识别回调、初始化AI对话完成回调、
+              初始化AI诊断处理器、初始化词库配置同步处理器、
+              初始化PiperTTSManager、启动WebSocket设备心跳
+    - shutdown：停止心跳、释放PiperTTS资源、关闭所有WebSocket连接、
+               停止健康检查、关闭httpx连接池、关闭后端客户端
     """
     # ========== 启动阶段 ==========
     # 初始化日志系统（控制台+文件双输出）
@@ -98,11 +111,6 @@ async def lifespan(app: FastAPI):
     await backend_client.initialize()
     logger.info(f"后端通用客户端已初始化 | 后端地址={BACKEND_BASE_URL}")
 
-    # 初始化异常音频临时存储（自动创建目录、启动定时清理）
-    audio_storage = AudioTempStorage()
-    await audio_storage.initialize()
-    logger.info("异常音频临时存储已初始化")
-
     # 初始化行为识别回调处理器（注入BackendClient，用于回调后端）
     behavior_callback.initialize(backend_client=backend_client)
     logger.info(
@@ -110,27 +118,16 @@ async def lifespan(app: FastAPI):
         f"回调路径={BEHAVIOR_CALLBACK_PATH}"
     )
 
-    # 初始化异常行为片段录音上传处理器（注入BackendClient和AudioTempStorage）
-    recording_upload = RecordingUpload()
-    await recording_upload.initialize(
-        backend_client=backend_client,
-        audio_storage=audio_storage,
-    )
-    logger.info(
-        f"录音上传处理器已初始化 | "
-        f"上传路径={RECORDING_UPLOAD_PATH}"
-    )
+    # 初始化AI对话完成回调（注入BackendClient，用于回调后端dialog-completions）
+    initialize_dialog_callback(backend_client=backend_client)
+    logger.info("AI对话完成回调功能已初始化")
 
-    # 将录音上传处理器注册为BehaviorCallback的音频处理器
-    # 当行为识别结果为ABNORMAL且包含abnormal_audio_clip时，自动触发上传
-    behavior_callback.register_audio_clip_handler(recording_upload.handle_audio_clip)
-    logger.info("录音上传处理器已注册为BehaviorCallback音频处理器，ABNORMAL行为将自动触发录音上传")
-
-    # 初始化AI时段诊断处理器（注入NodeManager，用于负载均衡选择算力节点）
+    # ========== 初始化AI诊断处理器（注入NodeManager，转发到算力节点） ==========
     diagnosis_handler.initialize(node_manager=node_manager)
     logger.info(
-        f"AI诊断处理器已初始化 | "
-        f"内部路径={DIAGNOSIS_INTERNAL_PATH}"
+        f"AI诊断处理器已初始化 | 推理方式=算力节点本地LLM | "
+        f"内部路径={DIAGNOSIS_INTERNAL_PATH} | "
+        f"超时={DIAGNOSIS_REQUEST_TIMEOUT}s"
     )
 
     # 初始化词库配置同步处理器（注入NodeManager，用于广播配置到所有健康节点）
@@ -140,25 +137,18 @@ async def lifespan(app: FastAPI):
         f"内部路径={CONFIG_SYNC_INTERNAL_PATH}"
     )
 
-    # ========== 新架构：Piper TTS本地部署 ==========
-    # 加载Piper TTS模型（服务启动时预加载，避免首次请求延迟）
-    tts_load_success = await piper_tts_manager.load_model()
-    if tts_load_success:
-        logger.info(
-            f"Piper TTS模型加载成功 | "
-            f"模型={PIPER_MODEL_PATH} | "
-            f"输出格式={PIPER_TARGET_SAMPLE_RATE}Hz/"
-            f"{PIPER_TARGET_SAMPLE_WIDTH * 8}bit/"
-            f"{PIPER_TARGET_CHANNELS}ch PCM"
-        )
+    # ========== 初始化PiperTTSManager（本地TTS模型） ==========
+    piper_load_success = await piper_tts_manager.load_model()
+    if piper_load_success:
+        logger.info("Piper TTS模型加载成功，值班播报功能可用")
     else:
         logger.error(
-            f"Piper TTS模型加载失败 | 模型={PIPER_MODEL_PATH} | "
+            f"Piper TTS模型加载失败 | "
             f"错误={piper_tts_manager.load_error} | "
             f"值班播报功能不可用，其他功能正常"
         )
 
-    # ========== 新架构：WebSocket设备连接管理 ==========
+    # ========== WebSocket设备连接管理 ==========
     ws_device_manager.initialize()
     await ws_device_manager.start_heartbeat()
     logger.info(
@@ -196,12 +186,26 @@ async def lifespan(app: FastAPI):
     raw_audio_initialize()
     logger.info("原始异常语音上传模块已初始化")
 
+    # ========== 知识库ID缓存 ==========
+    knowledge_base_cache_instance = KnowledgeBaseCache()
+    await knowledge_base_cache_instance.start_cleanup()
+    logger.info(
+        f"知识库ID缓存已启动 | "
+        f"缓存过期时间={KNOWLEDGE_BASE_CACHE_TTL}s | "
+        f"清理间隔={KNOWLEDGE_BASE_CACHE_CLEANUP_INTERVAL}s"
+    )
+
     logger.info("主网关节点启动完成，开始接收请求")
 
     yield  # 应用运行中，接收并处理请求
 
     # ========== 关闭阶段 ==========
     logger.info("主网关节点关闭中...")
+
+    # 关闭知识库ID缓存（v3.2新增）
+    await knowledge_base_cache_instance.stop_cleanup()
+    knowledge_base_cache_instance.clear_all()
+    logger.info("知识库ID缓存已关闭")
 
     # 关闭原始音频临时文件管理器（停止定时清理）
     await audio_temp_manager.close()
@@ -217,13 +221,9 @@ async def lifespan(app: FastAPI):
     await ws_device_manager.close_all()
     logger.info("WebSocket设备管理器已关闭")
 
-    # 释放Piper TTS模型资源
+    # 释放PiperTTSManager资源
     piper_tts_manager.release()
     logger.info("Piper TTS模型资源已释放")
-
-    # 关闭异常音频临时存储
-    await audio_storage.close()
-    logger.info("音频临时存储已关闭")
 
     # 关闭后端通用客户端，释放连接池资源
     await backend_client.close()
@@ -246,25 +246,32 @@ app = FastAPI(
     description=(
         "算法侧网关服务，负责请求路由、负载均衡、结果汇总。"
         "部署架构：1台主树莓派（网关） + 4台从树莓派（算力）\n"
-        "值班播报：本地Piper TTS + WebSocket流式推送"
+        "v3.2：算力节点本地LLM诊断 + Piper本地TTS播报 + 异常录音合并到voice-behaviors"
     ),
-    version="4.2.0",
+    version="3.2.0",
     lifespan=lifespan,
 )
 
-# 注册路由 - 算力节点转发（行为识别、诊断总结、健康检查、节点状态查询）
+# 注册路由 - 算力节点转发（行为识别、健康检查、节点状态查询）
 app.include_router(router)
 
-# 注册路由 - 后端调用算法接口（AI诊断、词库同步、旧架构TTS）
+# 注册路由 - 后端调用算法接口（AI诊断、词库同步）
 app.include_router(backend_router)
 
-# 注册路由 - 值班播报新架构（Piper TTS本地合成 + WebSocket推送）
+# 注册路由 - 值班播报POST接口（Piper本地TTS）
 app.include_router(duty_broadcast_router)
 
-# 注册路由 - 硬件状态上报
+# 注册路由 - WebSocket设备连接（根路径 /ws/device/{deviceNo}）
+app.include_router(ws_router)
+
+# 注册路由 - 硬件状态上报（硬件→算法通道）
 app.include_router(hardware_router)
 
-# 注册全局异常处理器
+# 注册路由 - 原始异常语音上传（硬件→算法通道，共享 /internal/badge/hardware 前缀）
+from raw_audio_router import raw_audio_router
+app.include_router(raw_audio_router, prefix="/internal/badge/hardware")
+
+# 注册全局异常处理器（顺序：先具体后通用）
 app.add_exception_handler(GatewayException, gateway_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
