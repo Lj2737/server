@@ -55,6 +55,8 @@ from config import (
     DEVICE_EVENT_FORWARD_PATH,
     DEVICE_EVENT_FORWARD_MAX_RETRIES,
     DEVICE_EVENT_FORWARD_RETRY_INTERVAL,
+    DIALOG_COMPLETION_CALLBACK_PATH,
+    KNOWLEDGE_BASE_QUERY_PATH,
 )
 
 
@@ -393,6 +395,95 @@ class BackendClient:
             f"完整原始数据={event_data}"
         )
         return False
+
+    # ==================== 业务便捷方法 ====================
+
+    async def report_dialog_completion(self, device_no: str, dialog_time: str) -> bool:
+        """
+        回调后端：AI对话完成通知
+
+        POST /badge/v1/internal/ai/dialog-completions
+        Content-Type: application/json
+        Body: {"deviceNo": "BADGE0001", "dialogTime": "2026-05-08 10:35:00"}
+
+        算力节点完成AI对话后，主网关调用此方法通知后端。
+        后端收到后更新对话记录、触发后续业务流程。
+
+        Args:
+            device_no: 设备编号
+            dialog_time: 对话完成时间，格式yyyy-MM-dd HH:mm:ss
+
+        Returns:
+            True: 回调成功（后端返回2xx）
+            False: 回调失败（网络异常、后端返回非2xx、客户端未初始化）
+        """
+        try:
+            result = await self.post(
+                path=DIALOG_COMPLETION_CALLBACK_PATH,
+                json_body={
+                    "deviceNo": device_no,
+                    "dialogTime": dialog_time,
+                },
+            )
+            logger.info(
+                f"AI对话完成回调成功 | deviceNo={device_no} | "
+                f"dialogTime={dialog_time} | 后端响应={result}"
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"AI对话完成回调失败 | deviceNo={device_no} | "
+                f"dialogTime={dialog_time} | "
+                f"错误类型={type(e).__name__} | 错误={str(e)[:300]}"
+            )
+            return False
+
+    async def get_knowledge_base_id(self, device_no: str) -> Optional[str]:
+        """
+        查询后端：获取设备对应的知识库ID
+
+
+        POST /badge/v1/internal/ai/devices/knowledge-base
+        Content-Type: application/json
+        Body: {"deviceNo": "BADGE0001"}
+
+        算力节点需要查询设备对应的知识库ID时，主网关调用此方法从后端获取。
+        结果会被本地缓存（knowledge_base_cache），减少后端调用频次。
+
+        Args:
+            device_no: 设备编号
+
+        Returns:
+            knowledgeBaseId字符串，如 "dataset-001"
+            None: 查询失败（网络异常、后端返回非2xx、客户端未初始化、响应中无knowledgeBaseId）
+        """
+        try:
+            result = await self.post(
+                path=KNOWLEDGE_BASE_QUERY_PATH,
+                json_body={"deviceNo": device_no},
+            )
+            # 从后端响应中提取knowledgeBaseId
+            knowledge_base_id = None
+            if isinstance(result, dict):
+                # 后端响应格式：{"code": 200, "msg": "ok", "data": {"knowledgeBaseId": "dataset-001"}}
+                data = result.get("data", {})
+                if isinstance(data, dict):
+                    knowledge_base_id = data.get("knowledgeBaseId")
+                # 兼容：data可能直接是knowledgeBaseId
+                elif isinstance(data, str):
+                    knowledge_base_id = data
+
+            logger.info(
+                f"知识库ID查询成功 | deviceNo={device_no} | "
+                f"knowledgeBaseId={knowledge_base_id}"
+            )
+            return knowledge_base_id
+        except Exception as e:
+            logger.error(
+                f"知识库ID查询失败 | deviceNo={device_no} | "
+                f"错误类型={type(e).__name__} | 错误={str(e)[:300]}"
+            )
+            return None
 
     # ==================== 统一请求核心实现 ====================
 

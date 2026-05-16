@@ -52,6 +52,8 @@ from config import (
 from audio_temp_manager import AudioTempManager
 from node_manager import NodeManager
 from http_client import HttpClientSingleton
+from behavior_callback import BehaviorCallback
+from router import behavior_callback
 
 
 # ==================== 常量定义 ====================
@@ -491,6 +493,28 @@ async def _forward_to_compute_node_task(
                     f"deviceNo={device_no} | 节点={selected_node} | "
                     f"状态码={response.status_code}"
                 )
+
+                # 新增：触发行为识别回调
+                try:
+                    response_data = response.json()
+                    if response_data.get("code") == 200 and response_data.get("data"):
+                        # 异步触发回调（fire-and-forget）
+                        asyncio.create_task(
+                            behavior_callback.handle_result(
+                                inference_data=response_data["data"],
+                                device_no=device_no,
+                                event_time=start_time_str,
+                            )
+                        )
+                        logger.info(
+                            f"行为识别回调已触发 | uploadId={upload_id} | "
+                            f"deviceNo={device_no}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"触发行为识别回调失败 | uploadId={upload_id} | "
+                        f"错误={str(e)[:200]}"
+                    )
 
                 # 转发成功后删除临时文件
                 await audio_temp_manager.delete(temp_file_path)
