@@ -1,7 +1,7 @@
 """
 智能胸牌服务管理系统 - 值班播报路由
 核心功能：
-1. WebSocket端点：胸牌硬件通过 WS /ws/device/{deviceNo} 连接主网关
+1. WebSocket端点：胸牌硬件通过 WS /badge/v1/algorithm/ws/device/{deviceNo} 连接主网关
 2. POST接口：后端调用 POST /badge/v1/algorithm/duty-broadcasts/tts 触发播报
 3. 入参校验：deviceNo非空且长度≤20，broadcastContent非空且长度≤200字
 4. 联动逻辑：入参校验 → TTS可用性检查 → 设备在线检查 → 流式合成 → 流式推送
@@ -13,7 +13,7 @@
 - 出参：{"code": 200, "msg": "ok", "data": {"success": true}, "request_id": "..."}
 
 WebSocket端点：
-- 路径：WS /ws/device/{deviceNo}
+- 路径：WS /badge/v1/algorithm/ws/device/{deviceNo}
 - 协议：ping/pong心跳 + 二进制PCM音频帧 + 文本控制帧
 
 处理流程（严格按顺序）：
@@ -26,7 +26,7 @@ WebSocket端点：
 
 使用示例：
     # WebSocket连接测试
-    # ws://网关IP:8090/ws/device/BADGE0001
+    # ws://网关IP:8090/badge/v1/algorithm/ws/device/BADGE0001
 
     # POST播报请求
     # curl -X POST http://网关IP:8090/badge/v1/algorithm/duty-broadcasts/tts \
@@ -84,9 +84,9 @@ duty_broadcast_router = APIRouter(
     tags=["值班播报接口"],
 )
 
-# WebSocket路由器（v3.2：独立路由器，无前缀，WebSocket端点在根路径 /ws/device/{deviceNo}）
+# WebSocket路由器：统一使用 /badge/v1 前缀
 ws_router = APIRouter(
-    prefix = "/algorithm/badge",
+    prefix="/badge/v1/algorithm",
     tags=["WebSocket设备连接"],
 )
 
@@ -95,7 +95,7 @@ piper_tts_manager = PiperTTSManager()
 ws_device_manager = WebSocketDeviceManager()
 
 
-# ==================== WebSocket端点：胸牌设备连接（v3.2：根路径 /ws/device/{deviceNo}） ====================
+# ==================== WebSocket端点：胸牌设备连接 ====================
 
 @ws_router.websocket("/ws/device/{device_no}")
 async def device_websocket(websocket: WebSocket, device_no: str):

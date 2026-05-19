@@ -4,7 +4,7 @@
 适应部署架构：1台主树莓派（网关） + 4台从树莓派（算力）
 
 v3.2更新：
-- 硬件接收路径恢复为 /internal/badge/hardware 前缀（硬件→算法，非算法→后端）
+- 硬件接收路径统一为 /badge/v1/internal/hardware 前缀（硬件→算法，非算法→后端）
 - 新增算力节点→主网关内部接口路径（dialog-completed、knowledge-base）
 - 新增知识库缓存配置
 - 新增算法查询设备知识库ID接口路径
@@ -64,9 +64,9 @@ HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS: int = 10
 
 # ==================== 路由映射配置 ====================
 # 外部路径 → 算力节点内部路径映射
-# 对外接口统一前缀 /api/v1/gateway/，内部统一前缀 /api/v1/internal/inference/
+# 对外接口统一前缀 /badge/v1/gateway/，内部统一前缀 /badge/v1/internal/algorithm/
 ROUTE_MAPPING: Dict[str, str] = {
-    "/api/v1/gateway/behavior-recognition": "/api/v1/internal/inference/behavior-recognition",
+    "/badge/v1/gateway/behavior-recognition": "/badge/v1/internal/algorithm/inference/behavior-recognition",
 }
 
 
@@ -192,9 +192,9 @@ DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = 1.0
 
 # ==================== 算力节点→主网关内部接口路径 ====================
 # AI对话完成内部接口（算力节点调用主网关）
-DIALOG_COMPLETED_INTERNAL_PATH: str = "/api/v1/internal/dialog-completed"
+DIALOG_COMPLETED_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/dialog-completed"
 # 知识库查询内部接口（算力节点调用主网关）
-KNOWLEDGE_BASE_INTERNAL_PATH: str = "/api/v1/internal/knowledge-base"
+KNOWLEDGE_BASE_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/knowledge-base"
 
 # ==================== 知识库缓存配置 ====================
 # 知识库ID缓存过期时间（秒），默认24小时
@@ -208,14 +208,14 @@ KNOWLEDGE_BASE_QUERY_PATH: str = "/badge/v1/internal/ai/devices/knowledge-base"
 
 # ==================== 功能3：AI时段诊断总结配置 ====================
 # AI诊断请求转发到算力节点的内部路径
-DIAGNOSIS_INTERNAL_PATH: str = "/api/v1/internal/inference/diagnosis-summary"
+DIAGNOSIS_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/inference/diagnosis-summary"
 # AI诊断请求超时时间（秒），LLM推理耗时较长，设置为60秒
 DIAGNOSIS_REQUEST_TIMEOUT: float = 60.0
 
 
 # ==================== 功能4：词库配置同步配置 ====================
 # 词库配置同步到算力节点的内部路径
-CONFIG_SYNC_INTERNAL_PATH: str = "/api/v1/internal/config/sync"
+CONFIG_SYNC_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/config/sync"
 # 词库配置同步请求超时时间（秒）
 CONFIG_SYNC_REQUEST_TIMEOUT: float = 10.0
 
@@ -224,7 +224,7 @@ CONFIG_SYNC_REQUEST_TIMEOUT: float = 10.0
 # TTS播报请求超时时间（秒）
 TTS_REQUEST_TIMEOUT: float = 30.0
 # TTS播报请求转发到算力节点的内部路径
-TTS_INTERNAL_PATH: str = "/api/v1/internal/tts/broadcast"
+TTS_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/tts/broadcast"
 
 
 # ==================== Piper TTS本地部署配置 ====================
@@ -265,6 +265,8 @@ BROADCAST_CONTENT_MAX_LENGTH: int = 200
 
 
 # ==================== 硬件状态上报配置 ====================
+# 硬件→算法网关统一前缀
+HARDWARE_API_PREFIX: str = "/badge/v1/internal/hardware"
 # 设备编号最大长度
 DEVICE_NO_MAX_LENGTH: int = 20
 # 设备编号正则：仅支持字母、数字、下划线

@@ -2,17 +2,17 @@
 智能胸牌服务管理系统 - 词库配置同步请求处理器
 核心功能：
 1. 接收后端主动调用，同步词库配置到所有健康的算力节点
-2. 入参校验：configType必须为KEYWORD，items不能为空
+2. 入参校验：sop、forbidden、customer至少一类不能为空
 3. 调用NodeManager的广播方法，将配置同步到所有健康的算力节点
 4. 等待所有节点返回同步结果
 5. 所有节点同步成功返回success=true，部分失败返回success=false并标注失败节点
 6. 完整日志记录：配置版本号、同步时间、节点同步状态、失败原因
 
-对应后端接口：POST /algorithm/badge/config/sync
-算力节点内部接口：POST /api/v1/internal/config/sync
+对应后端接口：POST /badge/v1/algorithm/config/sync
+算力节点内部接口：POST /badge/v1/internal/algorithm/config/sync
 
 处理流程（严格按顺序）：
-    步骤1：入参校验，configType必须为KEYWORD，items不能为空
+    步骤1：入参校验，sop、forbidden、customer至少一类不能为空
     步骤2：生成配置版本号（时间戳格式），调用广播方法
     步骤3：等待所有节点返回同步结果
     步骤4：统计成功/失败节点，构建返回结果
@@ -20,11 +20,9 @@
 
 请求体格式（后端→网关）：
     {
-        "configType": "KEYWORD",
-        "items": [
-            {"keyword": "违规操作", "category": "安全"},
-            {"keyword": "未按SOP", "category": "流程"}
-        ]
+        "sop": [],
+        "forbidden": [],
+        "customer": []
     }
 
 返回体格式（网关→后端）：
@@ -63,8 +61,9 @@
 
     # 处理词库同步请求
     result = await handler.handle_config_sync(request_body={
-        "configType": "KEYWORD",
-        "items": [{"keyword": "违规操作", "category": "安全"}],
+        "sop": [],
+        "forbidden": [],
+        "customer": [],
     })
 """
 import asyncio
@@ -94,7 +93,7 @@ class ConfigSyncHandler:
 
     职责：
     - 接收后端主动调用的词库配置同步请求
-    - 校验configType必须为KEYWORD
+    - 校验sop/forbidden/customer至少一类非空
     - 广播配置到所有健康的算力节点
     - 等待所有节点返回同步结果
     - 统计成功/失败节点，构建返回结果
@@ -149,8 +148,9 @@ class ConfigSyncHandler:
         Args:
             request_body: 后端发送的请求体
                 {
-                    "configType": "KEYWORD",
-                    "items": [{"keyword": "违规操作", "category": "安全"}]
+                    "sop": [],
+                    "forbidden": [],
+                    "customer": []
                 }
 
         Returns:
@@ -182,8 +182,9 @@ class ConfigSyncHandler:
         if validation_error:
             return validation_error
 
-        config_type = request_body.get("configType", "")
-        items = request_body.get("items", [])
+        sop = request_body.get("sop", [])
+        forbidden = request_body.get("forbidden", [])
+        customer = request_body.get("customer", [])
 
         # ========== 步骤2：生成配置版本号，准备广播 ==========
         # 配置版本号格式：yyyyMMddHHmmss
@@ -191,8 +192,8 @@ class ConfigSyncHandler:
 
         logger.info(
             f"词库配置同步请求开始 | request_id={request_id} | "
-            f"configType={config_type} | configVersion={config_version} | "
-            f"词库条目数={len(items)}"
+            f"configVersion={config_version} | "
+            f"sop={len(sop)} | forbidden={len(forbidden)} | customer={len(customer)}"
         )
 
         # 获取所有健康节点
@@ -295,8 +296,7 @@ class ConfigSyncHandler:
         校验词库配置同步请求的必传字段
 
         必传字段：
-        - configType: 配置类型，必须为"KEYWORD"
-        - items: 词库条目列表，至少1个
+        - sop/forbidden/customer: 三类词库配置，至少一类非空
 
         Args:
             request_body: 请求体
@@ -306,47 +306,32 @@ class ConfigSyncHandler:
             None: 校验通过
             Dict: 校验失败的错误响应
         """
-        # 校验configType
-        config_type = request_body.get("configType")
-        if not config_type:
-            logger.warning(
-                f"词库同步入参校验失败 | configType为空 | request_id={request_id}"
-            )
-            return build_error_response(
-                code=ErrorCode.BAD_REQUEST,
-                msg="configType为必传字段",
-                request_id=request_id,
-            )
-        if config_type != ConfigType.KEYWORD:
-            logger.warning(
-                f"词库同步入参校验失败 | configType不合法 | "
-                f"值={config_type} | 允许值={ConfigType.KEYWORD} | "
-                f"request_id={request_id}"
-            )
-            return build_error_response(
-                code=ErrorCode.BAD_REQUEST,
-                msg=f"configType必须为{ConfigType.KEYWORD}，当前值：{config_type}",
-                request_id=request_id,
-            )
+        for group_name in ("sop", "forbidden", "customer"):
+            group_value = request_body.get(group_name, [])
+            if group_value is None:
+                request_body[group_name] = []
+                continue
+            if not isinstance(group_value, list):
+                logger.warning(
+                    f"词库同步入参校验失败 | {group_name}非数组 | request_id={request_id}"
+                )
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"{group_name}必须为数组",
+                    request_id=request_id,
+                )
 
-        # 校验items
-        items = request_body.get("items")
-        if not items or not isinstance(items, list):
+        if (
+            not request_body.get("sop")
+            and not request_body.get("forbidden")
+            and not request_body.get("customer")
+        ):
             logger.warning(
-                f"词库同步入参校验失败 | items为空或非数组 | request_id={request_id}"
+                f"词库同步入参校验失败 | sop/forbidden/customer均为空 | request_id={request_id}"
             )
             return build_error_response(
                 code=ErrorCode.BAD_REQUEST,
-                msg="items为必传字段，且必须为非空数组",
-                request_id=request_id,
-            )
-        if len(items) == 0:
-            logger.warning(
-                f"词库同步入参校验失败 | items数组为空 | request_id={request_id}"
-            )
-            return build_error_response(
-                code=ErrorCode.BAD_REQUEST,
-                msg="items不能为空数组",
+                msg="sop、forbidden、customer至少有一类不能为空",
                 request_id=request_id,
             )
 
@@ -363,17 +348,17 @@ class ConfigSyncHandler:
     ) -> dict:
         """
         向单个算力节点同步词库配置
-        请求路径：POST http://{address}/api/v1/internal/config/sync
+        请求路径：POST http://{address}/badge/v1/internal/algorithm/config/sync
 
         重要：算力节点Pydantic模型使用snake_case字段名，
-        此处必须发送 snake_case 格式（config_type/config_version/items），
-        不能发 camelCase 格式（configType/configVersion/configData），
+        此处必须发送 snake_case 元字段（config_type/config_version）和文档分组（sop/forbidden/customer），
+        不能发旧版 camelCase 格式（configType/configVersion/configData），
         否则算力节点参数校验会返回422失败。
 
         字段映射（后端camelCase → 算力节点snake_case）：
-        - configType → config_type
+        - 固定补充 config_type=KEYWORD
         - （网关生成）→ config_version
-        - items → items（字段名不变，但内容原样透传）
+        - sop/forbidden/customer → 原样透传
 
         Args:
             address: 节点地址
@@ -390,13 +375,13 @@ class ConfigSyncHandler:
         client = await HttpClientSingleton.get_client()
         url = f"http://{address}{CONFIG_SYNC_INTERNAL_PATH}"
 
-        # 构建同步请求体（snake_case，匹配算力节点Pydantic模型字段名）
-        # ⚠️ 注意：算力节点 ConfigSyncRequest 的字段名是 config_type / config_version / items
-        # ⚠️ 绝对不能发 configType / configVersion / configData，否则422参数校验失败
+        # 构建同步请求体：网关补充内部元字段，三类词库数据按文档原样透传。
         sync_body = {
-            "config_type": ConfigType.KEYWORD,       # 后端传configType → 转为config_type
-            "config_version": config_version,         # 网关生成的版本号 → config_version
-            "items": request_body.get("items", []),    # items字段名不变，内容原样透传
+            "config_type": ConfigType.KEYWORD,
+            "config_version": config_version,
+            "sop": request_body.get("sop", []),
+            "forbidden": request_body.get("forbidden", []),
+            "customer": request_body.get("customer", []),
         }
 
         forward_headers = {
@@ -407,7 +392,8 @@ class ConfigSyncHandler:
         logger.debug(
             f"词库配置同步发送 | request_id={request_id} | "
             f"节点={address} | 版本={config_version} | "
-            f"词库条目数={len(sync_body['items'])}"
+            f"sop={len(sync_body['sop'])} | forbidden={len(sync_body['forbidden'])} | "
+            f"customer={len(sync_body['customer'])}"
         )
 
         response = await client.post(

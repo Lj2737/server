@@ -17,7 +17,7 @@
 
     # POST请求 - 回调后端语音行为
     result = await client.post(
-        path="/internal/badge/ai/voice-behaviors",
+        path="/badge/v1/internal/ai/voice-behaviors",
         json_body={
             "eventId": "AI_BEHAVIOR_20260508103100001",
             "eventTime": "2026-05-08 10:31:00",
@@ -30,7 +30,7 @@
 
     # GET请求 - 查询后端数据
     result = await client.get(
-        path="/internal/badge/devices/BADGE0001",
+        path="/badge/v1/internal/ai/devices/knowledge-base",
     )
 
     # 关闭（在FastAPI shutdown中调用）
@@ -163,7 +163,7 @@ class BackendClient:
         发送POST请求到后端
 
         Args:
-            path: 接口路径（相对于BACKEND_BASE_URL），如 /internal/badge/ai/voice-behaviors
+            path: 接口路径（相对于BACKEND_BASE_URL），如 /badge/v1/internal/ai/voice-behaviors
             json_body: 请求体JSON数据
             idempotency_key: 幂等键（如eventId），重试时保持同一ID
             extra_headers: 额外的请求头（会覆盖默认鉴权头）
@@ -472,6 +472,9 @@ class BackendClient:
                 # 兼容：data可能直接是knowledgeBaseId
                 elif isinstance(data, str):
                     knowledge_base_id = data
+                # 兼容文档返回：{"knowledgeBaseId": "dataset-001"}
+                if knowledge_base_id is None:
+                    knowledge_base_id = result.get("knowledgeBaseId")
 
             logger.info(
                 f"知识库ID查询成功 | deviceNo={device_no} | "

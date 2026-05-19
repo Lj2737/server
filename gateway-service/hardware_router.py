@@ -8,8 +8,8 @@
 5. 本地缓存设备最新状态（DeviceStatusCache）
 6. 异步透传原始数据到后端（复用BackendClient，不阻塞硬件响应）
 
-接口规范（对齐v3.2文档7.1节）：
-- 接口路径：POST /internal/badge/hardware/device-events
+接口规范（对齐统一网关前缀）：
+- 接口路径：POST /badge/v1/internal/hardware/device-events
 - Content-Type：application/json
 - 入参：{"deviceNo":"BADGE0001","eventType":"HEARTBEAT","reportTime":"...","payload":{...}}
 - 出参：{"code":200,"message":"接收成功","data":{"receiveTime":"..."}}
@@ -22,7 +22,7 @@
 
 使用示例：
     # 正常心跳上报
-    curl -X POST http://网关IP:8090/internal/badge/hardware/device-events \
+    curl -X POST http://网关IP:8090/badge/v1/internal/hardware/device-events \
       -H "Content-Type: application/json" \
       -d '{
         "deviceNo": "BADGE0001",
@@ -32,7 +32,7 @@
       }'
 
     # 正常告警上报
-    curl -X POST http://网关IP:8090/internal/badge/hardware/device-events \
+    curl -X POST http://网关IP:8090/badge/v1/internal/hardware/device-events \
       -H "Content-Type: application/json" \
       -d '{
         "deviceNo": "BADGE0001",
@@ -60,6 +60,7 @@ from config import (
     BATTERY_LEVEL_MAX,
     SIGNAL_LEVEL_MIN,
     SIGNAL_LEVEL_MAX,
+    HARDWARE_API_PREFIX,
 )
 from device_status_cache import DeviceStatusCache
 from utils import BackendClient
@@ -242,7 +243,7 @@ class DeviceEventRequest(BaseModel):
 # ==================== 路由器创建 ====================
 
 hardware_router = APIRouter(
-    prefix="/internal/badge/hardware",
+    prefix=HARDWARE_API_PREFIX,
     tags=["硬件状态上报接口"],
 )
 

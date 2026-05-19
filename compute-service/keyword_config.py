@@ -31,8 +31,12 @@ class KeywordConfigManager:
         self._current_version: str = ""
         # 当前生效的词库配置内容（内存缓存）
         self._current_config: Dict[str, Any] = {}
-        # 词库配置项列表（供LLM推理引用）
-        self._keyword_items: List[Dict[str, Any]] = []
+        # 词库配置项按sop/forbidden/customer分组缓存（供LLM推理引用）
+        self._keyword_groups: Dict[str, List[Dict[str, Any]]] = {
+            "sop": [],
+            "forbidden": [],
+            "customer": [],
+        }
 
         # 确保数据目录存在
         config_path = Path(KEYWORD_CONFIG_FILE)
@@ -50,18 +54,18 @@ class KeywordConfigManager:
 
                 self._current_version = data.get("config_version", "")
                 self._current_config = data.get("config_data", {})
-                self._keyword_items = data.get("items", [])
+                self._keyword_groups = self._normalize_config_data(self._current_config)
 
                 logger.info(
                     f"词库配置从本地文件恢复 | 版本={self._current_version} | "
-                    f"条目数={len(self._keyword_items)}"
+                    f"条目数={self._count_keywords(self._keyword_groups)}"
                 )
             except Exception as e:
                 logger.error(f"词库配置文件加载失败 | 路径={KEYWORD_CONFIG_FILE} | 错误={e}")
                 # 加载失败时使用空配置，不影响服务启动
                 self._current_version = ""
                 self._current_config = {}
-                self._keyword_items = []
+                self._keyword_groups = {"sop": [], "forbidden": [], "customer": []}
         else:
             logger.info("本地词库配置文件不存在，使用空配置")
 
@@ -71,7 +75,6 @@ class KeywordConfigManager:
             data = {
                 "config_version": self._current_version,
                 "config_data": self._current_config,
-                "items": self._keyword_items,
             }
             with open(KEYWORD_CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -87,7 +90,7 @@ class KeywordConfigManager:
         self,
         config_type: str,
         config_version: str,
-        items: List[Dict[str, Any]],
+        config_data: Dict[str, List[Dict[str, Any]]],
     ) -> bool:
         """
         同步词库配置（主网关广播调用）
@@ -99,7 +102,7 @@ class KeywordConfigManager:
         Args:
             config_type: 配置类型，必须为KEYWORD
             config_version: 配置版本号
-            items: 配置明细数组
+            config_data: 按sop/forbidden/customer分组的配置数据
 
         Returns:
             同步是否成功
@@ -120,19 +123,19 @@ class KeywordConfigManager:
         # 更新内存缓存
         old_version = self._current_version
         self._current_version = config_version
+        self._keyword_groups = self._normalize_config_data(config_data)
         self._current_config = {
             "config_type": config_type,
             "config_version": config_version,
-            "items": items,
+            **self._keyword_groups,
         }
-        self._keyword_items = items
 
         # 保存到本地JSON文件
         self._save_to_file()
 
         logger.info(
             f"词库配置同步完成 | 旧版本={old_version} → 新版本={config_version} | "
-            f"条目数={len(items)}"
+            f"条目数={self._count_keywords(self._keyword_groups)}"
         )
         return True
 
@@ -148,24 +151,72 @@ class KeywordConfigManager:
         Returns:
             词库配置文本，空配置时返回"暂无词库配置"
         """
-        if not self._keyword_items:
+        if not self._keyword_groups or self._count_keywords(self._keyword_groups) == 0:
             return "暂无词库配置"
 
-        # 将词库条目格式化为可读文本
         parts = []
-        for item in self._keyword_items:
-            # 根据实际词库结构调整字段名
-            keyword = item.get("keyword", item.get("name", ""))
-            category = item.get("category", item.get("type", ""))
-            description = item.get("description", "")
-            if keyword:
-                if description:
-                    parts.append(f"- {keyword}（{category}）：{description}")
-                else:
-                    parts.append(f"- {keyword}（{category}）")
+        group_titles = {
+            "sop": "STANDARD/SOP话术",
+            "forbidden": "ABNORMAL/违禁词",
+            "customer": "CUSTOMER/顾客关键词",
+        }
+        for group_key in ("sop", "forbidden", "customer"):
+            config_items = self._keyword_groups.get(group_key, [])
+            if not config_items:
+                continue
+            parts.append(f"[{group_titles[group_key]}]")
+            for config_item in config_items:
+                config_item_id = config_item.get("configItemId", "")
+                config_item_name = config_item.get("configItemName", "")
+                parts.append(f"- 配置项: {config_item_name} ({config_item_id})")
+                for keyword in config_item.get("keywords", []):
+                    content = keyword.get("content", "")
+                    keyword_id = keyword.get("id", "")
+                    match_type = keyword.get("matchType")
+                    if content:
+                        parts.append(
+                            f"  - {content} | keywordId={keyword_id} | matchType={match_type}"
+                        )
 
         return "\n".join(parts) if parts else "暂无词库配置"
 
     def get_keyword_items(self) -> List[Dict[str, Any]]:
-        """获取当前词库配置条目列表"""
-        return self._keyword_items
+        """获取当前词库配置条目列表（兼容旧调用，返回三类配置项的扁平列表）"""
+        items: List[Dict[str, Any]] = []
+        for group_key, config_items in self._keyword_groups.items():
+            for item in config_items:
+                flattened = dict(item)
+                flattened["configGroup"] = group_key
+                items.append(flattened)
+        return items
+
+    def get_keyword_groups(self) -> Dict[str, List[Dict[str, Any]]]:
+        """获取当前按sop/forbidden/customer分组的词库配置"""
+        return self._keyword_groups
+
+    @staticmethod
+    def _normalize_config_data(config_data: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """归一化配置数据，仅保留文档约定的三类顶层字段。"""
+        if "items" in config_data and not any(
+            key in config_data for key in ("sop", "forbidden", "customer")
+        ):
+            legacy_items = list(config_data.get("items") or [])
+            return {
+                "sop": legacy_items,
+                "forbidden": [],
+                "customer": [],
+            }
+        return {
+            "sop": list(config_data.get("sop") or []),
+            "forbidden": list(config_data.get("forbidden") or []),
+            "customer": list(config_data.get("customer") or []),
+        }
+
+    @staticmethod
+    def _count_keywords(config_data: Dict[str, List[Dict[str, Any]]]) -> int:
+        """统计三类配置下的关键词总数。"""
+        total = 0
+        for config_items in config_data.values():
+            for config_item in config_items:
+                total += len(config_item.get("keywords") or [])
+        return total

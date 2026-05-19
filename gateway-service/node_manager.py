@@ -303,7 +303,7 @@ class NodeManager:
     def get_nodes_status(self) -> List[dict]:
         """
         获取所有节点的详细状态信息
-        供 GET /api/v1/gateway/nodes 接口使用
+        供 GET /badge/v1/gateway/nodes 接口使用
 
         Returns:
             节点状态列表，每个节点包含：地址、健康状态、连接数、配置版本等

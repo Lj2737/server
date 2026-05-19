@@ -4,7 +4,7 @@ FastAPI实例创建、路由注册、生命周期管理
 对外唯一暴露端口：8090，仅对接后端
 
 v3.2架构变更：
-- WebSocket端点从 /badge/v1/algorithm/ws/device/{deviceNo} 迁移到 /ws/device/{deviceNo}（根路径）
+- WebSocket端点统一为 /badge/v1/algorithm/ws/device/{deviceNo}
 - 新增算力节点→主网关内部接口：dialog-completed、knowledge-base
 - 新增知识库ID本地缓存（24小时TTL）
 - 新增BackendClient便捷方法：report_dialog_completion、get_knowledge_base_id
@@ -43,7 +43,16 @@ from config import (
 )
 from logger import setup_logger
 from router import router, behavior_callback, initialize_dialog_callback
-from backend_router import backend_router, diagnosis_handler, config_sync_handler
+from algorithm_call_backend_router import algorithm_call_backend_router
+from backend_call_algorithm_router import (
+    backend_call_algorithm_router,
+    diagnosis_handler,
+    config_sync_handler,
+)
+from algorithm_forward_device_to_backend_router import (
+    algorithm_forward_device_to_backend_router,
+)
+from hardware_call_algorithm_router import hardware_call_algorithm_router
 from node_manager import NodeManager
 from http_client import HttpClientSingleton
 from utils import BackendClient
@@ -55,14 +64,12 @@ from exception import (
 )
 # 值班播报模块（Piper本地TTS + WebSocket推送）
 from duty_broadcast_router import (
-    duty_broadcast_router,
     ws_router,
     piper_tts_manager,
     ws_device_manager,
 )
 # 硬件状态上报模块
 from hardware_router import (
-    hardware_router,
     device_status_cache,
     initialize_forward as hardware_initialize_forward,
 )
@@ -252,24 +259,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# 注册路由 - 算力节点转发（行为识别、健康检查、节点状态查询）
-app.include_router(router)
+# 注册路由 - 算法调用后端接口（行为识别回调、AI对话完成、知识库查询）
+app.include_router(algorithm_call_backend_router)
 
-# 注册路由 - 后端调用算法接口（AI诊断、词库同步）
-app.include_router(backend_router)
+# 注册路由 - 后端调用算法接口（AI诊断、词库同步、值班播报）
+app.include_router(backend_call_algorithm_router)
 
-# 注册路由 - 值班播报POST接口（Piper本地TTS）
-app.include_router(duty_broadcast_router)
+# 注册路由 - 网关基础接口（健康检查、节点状态、行为识别转发）
+app.include_router(router, tags=["网关基础接口"])
 
-# 注册路由 - WebSocket设备连接（根路径 /ws/device/{deviceNo}）
+# 注册路由 - WebSocket设备连接（/badge/v1/algorithm/ws/device/{deviceNo}）
 app.include_router(ws_router)
 
-# 注册路由 - 硬件状态上报（硬件→算法通道）
-app.include_router(hardware_router)
+# 注册路由 - 算法转发设备到后端接口
+app.include_router(algorithm_forward_device_to_backend_router)
 
-# 注册路由 - 原始异常语音上传（硬件→算法通道，共享 /internal/badge/hardware 前缀）
-from raw_audio_router import raw_audio_router
-app.include_router(raw_audio_router, prefix="/internal/badge/hardware")
+# 注册路由 - 硬件调用算法接口
+app.include_router(hardware_call_algorithm_router)
 
 # 注册全局异常处理器（顺序：先具体后通用）
 app.add_exception_handler(GatewayException, gateway_exception_handler)

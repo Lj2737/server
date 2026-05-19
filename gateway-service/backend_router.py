@@ -2,14 +2,14 @@
 智能胸牌服务管理系统 - 后端调用算法的接口注册
 核心功能：
 1. 功能3：响应后端AI时段诊断总结调用
-   - POST /algorithm/badge/users/diagnosis-summary
+   - POST /badge/v1/algorithm/users/diagnosis-summary
 2. 功能4：接收后端词库配置同步
-   - POST /algorithm/badge/config/sync
+   - POST /badge/v1/algorithm/config/sync
 
 功能5值班播报已迁移到 duty_broadcast_router.py（Piper TTS本地合成 + WebSocket推送）
 
 这些接口是后端主动调用算法的入口（区别于功能1/2的算法主动回调后端）
-路由前缀统一为 /algorithm/badge/，对齐v3文档后端→算法的接口规范
+路由前缀统一为 /badge/v1/algorithm/，对齐文档后端→算法的接口规范
 
 接口注册说明：
 - backend_router 由 main.py 在启动时通过 app.include_router() 注册
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from diagnosis_handler import DiagnosisHandler
 from config_sync_handler import ConfigSyncHandler
@@ -177,28 +177,56 @@ class DiagnosisRequest(BaseModel):
     )
 
 
+class KeywordContentItem(BaseModel):
+    """词库内容项"""
+    id: str = Field(..., min_length=1, description="后端生成的词库内容ID")
+    content: str = Field(..., min_length=1, description="词库内容")
+    matchType: Optional[str] = Field(
+        None,
+        description="匹配方式：sop下为FULL/SEMANTIC，forbidden/customer固定为null",
+        examples=["FULL"],
+    )
+
+
+class KeywordConfigItem(BaseModel):
+    """词库配置项分组"""
+    configItemId: str = Field(..., min_length=1, description="后端生成的配置项ID")
+    configItemName: str = Field(..., min_length=1, description="配置项名称")
+    keywords: List[KeywordContentItem] = Field(
+        ...,
+        min_length=1,
+        description="当前配置项下需要算法识别的词库内容",
+    )
+
+
 class ConfigSyncRequest(BaseModel):
     """
     词库配置同步请求体模型
     后端 → 主网关，Content-Type: application/json
-    对齐v3文档6.3节后端请求必传字段
+    对齐交付物清单6.3节后端请求必传字段
 
     必传字段：
-    - configType: 配置类型，必须为 "KEYWORD"
-    - items: 词库条目列表，至少1个
+    - sop/forbidden/customer: 三类词库顶层分组，至少一类非空
     """
-    configType: str = Field(
-        ...,
-        min_length=1,
-        description="配置类型，必须为KEYWORD",
-        examples=["KEYWORD"],
+    sop: List[KeywordConfigItem] = Field(
+        default=[],
+        description="SOP话术配置，按服务场景配置项分组",
     )
-    items: List[Dict[str, Any]] = Field(
-        ...,
-        min_length=1,
-        description="词库条目列表，至少1个",
-        examples=[[{"keyword": "违规操作", "category": "安全"}]],
+    forbidden: List[KeywordConfigItem] = Field(
+        default=[],
+        description="违禁词配置，按违禁词类型配置项分组",
     )
+    customer: List[KeywordConfigItem] = Field(
+        default=[],
+        description="顾客关键词配置，按顾客关键词类别配置项分组",
+    )
+
+    @model_validator(mode="after")
+    def validate_at_least_one_group(self) -> "ConfigSyncRequest":
+        """校验三类词库至少有一类非空。"""
+        if not self.sop and not self.forbidden and not self.customer:
+            raise ValueError("sop、forbidden、customer至少有一类不能为空")
+        return self
 
 
 # ==================== 路由器创建 ====================
@@ -294,19 +322,23 @@ async def config_sync(request: ConfigSyncRequest):
     接收后端词库配置同步
 
     完整流程：
-    1. Pydantic自动校验请求体（configType/items必传）
-    2. ConfigSyncHandler校验configType必须为KEYWORD
+    1. Pydantic自动校验请求体（sop/forbidden/customer至少一类非空）
+    2. ConfigSyncHandler校验三类词库分组
     3. 生成配置版本号，广播到所有健康算力节点
     4. 等待所有节点返回同步结果
     5. 返回同步结果汇总（全成功success=true，部分失败success=false）
 
     请求体（对齐v3文档6.3节）：
     {
-        "configType": "KEYWORD",
-        "items": [
-            {"keyword": "违规操作", "category": "安全"},
-            {"keyword": "未按SOP", "category": "流程"}
-        ]
+        "sop": [
+            {
+                "configItemId": "scene-greeting",
+                "configItemName": "迎宾接待",
+                "keywords": [{"id": "sop-001", "content": "欢迎光临", "matchType": "FULL"}]
+            }
+        ],
+        "forbidden": [],
+        "customer": []
     }
 
     成功响应：
@@ -326,7 +358,8 @@ async def config_sync(request: ConfigSyncRequest):
 
     logger.info(
         f"收到词库配置同步请求 | request_id={request_id} | "
-        f"configType={request.configType} | 词库条目数={len(request.items)}"
+        f"sop={len(request.sop)} | forbidden={len(request.forbidden)} | "
+        f"customer={len(request.customer)}"
     )
 
     # 将Pydantic模型转为dict传给handler

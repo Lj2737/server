@@ -107,7 +107,7 @@ async def health_check():
     }
 
 
-@router.get("/api/v1/gateway/nodes")
+@router.get("/badge/v1/gateway/nodes")
 async def get_nodes_status():
     """
     节点状态查询接口
@@ -125,7 +125,7 @@ async def get_nodes_status():
 
 # ==================== 语音行为识别推理转发（含回调后端） ====================
 
-@router.post("/api/v1/gateway/behavior-recognition")
+@router.post("/badge/v1/gateway/behavior-recognition")
 async def forward_behavior_recognition(request: Request):
     """
     语音行为识别推理请求转发 + 回调后端
@@ -199,7 +199,7 @@ async def _forward_to_compute_node(
 
     Args:
         request: 原始FastAPI请求对象
-        original_path: 请求原始路径（如 /api/v1/gateway/behavior-recognition）
+        original_path: 请求原始路径（如 /badge/v1/gateway/behavior-recognition）
         request_id: 请求唯一ID
 
     Returns:
@@ -439,7 +439,7 @@ def _trigger_behavior_callback(
 
 # ==================== 算力节点→主网关内部接口 ====================
 
-@router.post(DIALOG_COMPLETED_INTERNAL_PATH)
+@router.post(DIALOG_COMPLETED_INTERNAL_PATH, include_in_schema=False)
 async def dialog_completed(request: Request):
     """
     算力节点调用：AI对话完成通知
@@ -505,7 +505,7 @@ async def dialog_completed(request: Request):
         }
 
 
-@router.get(KNOWLEDGE_BASE_INTERNAL_PATH + "/{device_no}")
+@router.get(KNOWLEDGE_BASE_INTERNAL_PATH + "/{device_no}", include_in_schema=False)
 async def get_knowledge_base(device_no: str):
     """
     算力节点调用：查询设备知识库ID
@@ -531,6 +531,11 @@ async def get_knowledge_base(device_no: str):
         "data": {"knowledgeBaseId": null}
     }
     """
+    return await _get_knowledge_base_response(device_no)
+
+
+async def _get_knowledge_base_response(device_no: str):
+    """查询设备对应的知识库ID，供GET兼容入口和文档POST入口复用。"""
     logger.info(f"收到知识库ID查询请求 | deviceNo={device_no}")
 
     # ========== 步骤1：先查本地缓存 ==========
@@ -599,7 +604,7 @@ async def broadcast_config(config_data: dict, config_version: str) -> dict:
 
     流程：
     1. 筛选所有健康节点
-    2. 并发向所有健康节点发送POST /api/v1/internal/config/sync
+    2. 并发向所有健康节点发送POST /badge/v1/internal/algorithm/config/sync
     3. 等待所有节点响应（不因单个节点失败而中断其他节点）
     4. 统计成功/失败数量，更新成功节点的配置版本号
     5. 返回广播结果汇总
@@ -672,7 +677,7 @@ async def _sync_config_to_node(
 ) -> dict:
     """
     向单个算力节点同步词库配置
-    请求路径：POST http://{address}/api/v1/internal/config/sync
+    请求路径：POST http://{address}/badge/v1/internal/algorithm/config/sync
 
     Args:
         address: 节点地址
@@ -683,7 +688,7 @@ async def _sync_config_to_node(
         节点响应内容
     """
     client = await HttpClientSingleton.get_client()
-    url = f"http://{address}/api/v1/internal/config/sync"
+    url = f"http://{address}/badge/v1/internal/algorithm/config/sync"
 
     response = await client.post(
         url,

@@ -13,7 +13,7 @@
 - 网关同步返回结果，超时60秒
 
 对应后端接口：POST /badge/v1/algorithm/users/diagnosis-summary
-算力节点内部接口：POST /api/v1/internal/inference/diagnosis-summary
+算力节点内部接口：POST /badge/v1/internal/algorithm/inference/diagnosis-summary
 """
 import time
 import uuid

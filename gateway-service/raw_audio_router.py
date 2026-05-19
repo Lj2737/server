@@ -15,7 +15,7 @@
 - 转发失败不影响硬件上传接口的返回（硬件永远收到200）
 
 接口规范：
-- 接口路径：POST /internal/badge/hardware/raw-audio-upload
+- 接口路径：POST /badge/v1/internal/hardware/raw-audio-upload
 - Content-Type：multipart/form-data
 - 表单必传字段：
   ① file：原始音频文件（WAV格式）
@@ -24,7 +24,7 @@
 
 使用示例：
     # Postman模拟硬件上传
-    curl -X POST http://网关IP:8090/internal/badge/hardware/raw-audio-upload \
+    curl -X POST http://网关IP:8090/badge/v1/internal/hardware/raw-audio-upload \
       -F "file=@/path/to/audio.wav" \
       -F 'metadata={"uploadId":"upload_001","deviceNo":"BADGE0001","startTime":"2026-05-13 15:00:00"}'
 """
@@ -62,7 +62,7 @@ from router import behavior_callback
 METADATA_REQUIRED_KEYS = {"uploadId", "deviceNo", "startTime"}
 
 # 算力节点行为识别接口路径
-BEHAVIOR_RECOGNITION_PATH = "/api/v1/internal/inference/behavior-recognition"
+BEHAVIOR_RECOGNITION_PATH = "/badge/v1/internal/algorithm/inference/behavior-recognition"
 
 
 # ==================== 路由器创建 ====================
@@ -449,7 +449,7 @@ async def _forward_to_compute_node_task(
         # ========== 构建转发请求 ==========
         # 使用uploadId作为算力节点行为识别的request_id
         # 转发参数：audio_file、device_no、event_time、request_id
-        # 对齐算力节点接口 POST /api/v1/internal/inference/behavior-recognition
+        # 对齐算力节点接口 POST /badge/v1/internal/algorithm/inference/behavior-recognition
         files = {
             "audio_file": (
                 f"{upload_id}_{device_no}.wav",  # 文件名

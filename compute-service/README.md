@@ -44,9 +44,9 @@ compute-service/
 | 方法 | 路径 | 用途 | 调用方 |
 |------|------|------|--------|
 | GET | `/health` | 健康检查 | 主网关 |
-| POST | `/api/v1/internal/inference/behavior-recognition` | 语音行为识别推理 | 主网关 |
-| POST | `/api/v1/internal/inference/diagnosis-summary` | AI时段诊断总结推理 | 主网关 |
-| POST | `/api/v1/internal/config/sync` | 词库配置同步 | 主网关 |
+| POST | `/badge/v1/internal/algorithm/inference/behavior-recognition` | 语音行为识别推理 | 主网关 |
+| POST | `/badge/v1/internal/algorithm/inference/diagnosis-summary` | AI时段诊断总结推理 | 主网关 |
+| POST | `/badge/v1/internal/algorithm/config/sync` | 词库配置同步 | 主网关 |
 
 ## 接口详细说明
 
@@ -69,7 +69,7 @@ compute-service/
 - `model_status`: `loaded` / `failed`
 - 模型加载失败时主网关自动摘除本节点
 
-### 2. 语音行为识别 POST /api/v1/internal/inference/behavior-recognition
+### 2. 语音行为识别 POST /badge/v1/internal/algorithm/inference/behavior-recognition
 
 **请求格式：** FormData
 
@@ -104,7 +104,7 @@ compute-service/
 }
 ```
 
-### 3. AI时段诊断 POST /api/v1/internal/inference/diagnosis-summary
+### 3. AI时段诊断 POST /badge/v1/internal/algorithm/inference/diagnosis-summary
 
 **请求格式：** JSON
 
@@ -156,7 +156,7 @@ compute-service/
 }
 ```
 
-### 4. 词库配置同步 POST /api/v1/internal/config/sync
+### 4. 词库配置同步 POST /badge/v1/internal/algorithm/config/sync
 
 **请求格式：** JSON
 

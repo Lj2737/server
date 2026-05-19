@@ -1,14 +1,14 @@
 """
 智能胸牌服务管理系统 - WebSocket设备连接管理器
 核心功能：
-1. 胸牌硬件通过WebSocket连接主网关，路径：WS /ws/device/{deviceNo}
+1. 胸牌硬件通过WebSocket连接主网关，路径：WS /badge/v1/algorithm/ws/device/{deviceNo}
 2. 维护deviceNo → WebSocket连接的映射，支持根据deviceNo推送音频
 3. 心跳保活：每30秒发送ping包，连续3次无pong应答判定离线，自动清理连接
 4. 断连自动清理：连接关闭时删除映射关系，释放资源
 5. 支持异步流式推送：边合成音频边推送给胸牌，无需等待整段合成完成
 
 WebSocket协议约定：
-- 连接路径：ws://网关IP:8090/ws/device/{deviceNo}
+- 连接路径：ws://网关IP:8090/badge/v1/algorithm/ws/device/{deviceNo}
 - 心跳：服务端每30秒发ping，客户端回pong
 - 音频推送：服务端发二进制帧（PCM裸流），客户端直接播放
 - 播报开始标记：服务端发文本帧 "{"type":"broadcast_start","content":"播报内容"}"

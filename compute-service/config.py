@@ -45,7 +45,7 @@ CACHE_CLEANUP_INTERVAL: int = 60
 
 # ==================== ASR模型配置（sherpa-onnx-sense-voice-small） ====================
 # 模型文件目录（包含model.onnx.int8和tokens.txt）
-ASR_MODEL_DIR: str = "compute-service/models/sherpa-onnx-sense-voice-small"
+ASR_MODEL_DIR: str = "E:/Project-python/server/compute-service/models/sherpa-onnx-sense-voice-small"
 # 采样率（固定16000Hz，直接适配sense-voice输入要求）
 ASR_SAMPLE_RATE: int = 16000
 # 识别语言：zh=中文
@@ -62,7 +62,7 @@ ASR_TIMEOUT: float = 10.0
 
 # ==================== LLM模型配置（qwen2.5-1.5b-instruct-q4_k_m.gguf） ====================
 # GGUF模型文件路径
-LLM_MODEL_PATH: str = "compute-service/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+LLM_MODEL_PATH: str = "E:/Project-python/server/compute-service/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 # 上下文窗口大小
 LLM_N_CTX: int = 2048
 # 推理线程数（树莓派5B核心数）
@@ -183,6 +183,8 @@ BEHAVIOR_SYSTEM_PROMPT: str = (
     "{\n"
     '  "behavior_type": "枚举值",\n'
     '  "summary": "100字以内的行为摘要",\n'
+    '  "config_item_id": "命中的配置项ID，未命中时为空字符串",\n'
+    '  "keyword_content": "命中的关键词内容，未命中时为空字符串",\n'
     '  "is_abnormal": true或false\n'
     "}\n"
     "注意：仅输出JSON，不要输出任何其他自然语言解释、Markdown格式或代码块标记。"

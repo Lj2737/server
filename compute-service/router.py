@@ -2,9 +2,9 @@
 智能胸牌服务管理系统 - 算力节点API路由
 核心接口：
 1. GET /health - 健康检查
-2. POST /api/v1/internal/inference/behavior-recognition - 语音行为识别推理（支持1-2声道，多声道自动转单声道）
-3. POST /api/v1/internal/inference/diagnosis-summary - AI时段诊断总结推理
-4. POST /api/v1/internal/config/sync - 词库配置同步
+2. POST /badge/v1/internal/algorithm/inference/behavior-recognition - 语音行为识别推理（支持1-2声道，多声道自动转单声道）
+3. POST /badge/v1/internal/algorithm/inference/diagnosis-summary - AI时段诊断总结推理
+4. POST /badge/v1/internal/algorithm/config/sync - 词库配置同步
 """
 import asyncio
 import time
@@ -121,7 +121,7 @@ async def health_check():
 # ==================== 语音行为识别推理接口 ====================
 
 @router.post(
-    "/api/v1/internal/inference/behavior-recognition",
+    "/badge/v1/internal/algorithm/inference/behavior-recognition",
     response_model=BehaviorRecognitionResponse,
 )
 async def behavior_recognition(
@@ -256,6 +256,8 @@ async def behavior_recognition(
             result_data = {
                 "behavior_type": behavior_type,
                 "summary": llm_result.get("summary", ""),
+                "config_item_id": llm_result.get("config_item_id", llm_result.get("configItemId", "")),
+                "keyword_content": llm_result.get("keyword_content", llm_result.get("keywordContent", "")),
                 "is_abnormal": llm_result.get("is_abnormal", behavior_type == BehaviorType.ABNORMAL),
             }
             # 仅ABNORMAL时返回异常音频片段
@@ -304,7 +306,7 @@ async def behavior_recognition(
 # ==================== AI时段诊断总结推理接口 ====================
 
 @router.post(
-    "/api/v1/internal/inference/diagnosis-summary",
+    "/badge/v1/internal/algorithm/inference/diagnosis-summary",
     response_model=DiagnosisSummaryResponse,
 )
 async def diagnosis_summary(body: DiagnosisSummaryRequest):
@@ -430,7 +432,7 @@ async def diagnosis_summary(body: DiagnosisSummaryRequest):
 # ==================== 词库配置同步接口 ====================
 
 @router.post(
-    "/api/v1/internal/config/sync",
+    "/badge/v1/internal/algorithm/config/sync",
     response_model=ConfigSyncResponse,
 )
 async def config_sync(body: ConfigSyncRequest):
@@ -460,13 +462,16 @@ async def config_sync(body: ConfigSyncRequest):
         }
 
     # ========== ③④ 同步配置（内存+文件+实时生效） ==========
-    # 将Pydantic模型中的items转为dict列表供keyword_config_manager使用
-    items_dicts = [item.model_dump() for item in body.items]
+    config_data = {
+        "sop": [item.model_dump() for item in body.sop],
+        "forbidden": [item.model_dump() for item in body.forbidden],
+        "customer": [item.model_dump() for item in body.customer],
+    }
 
     success = keyword_config_manager.sync_config(
         config_type=body.config_type,
         config_version=body.config_version,
-        items=items_dicts,
+        config_data=config_data,
     )
 
     if not success:

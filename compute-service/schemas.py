@@ -9,7 +9,7 @@
 import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ==================== 通用响应模型 ====================
@@ -147,6 +147,35 @@ class KeywordItem(BaseModel):
     weight: float = Field(1.0, ge=0, description="权重，默认1.0")
 
 
+class KeywordContentItem(BaseModel):
+    """词库内容项，对齐后端同步给算法的keywords结构"""
+    id: str = Field(..., min_length=1, description="后端生成的词库内容ID")
+    content: str = Field(..., min_length=1, description="词库内容")
+    matchType: Optional[str] = Field(
+        None,
+        description="匹配方式：sop下为FULL/SEMANTIC，forbidden/customer固定为null",
+    )
+
+    @field_validator("matchType")
+    @classmethod
+    def validate_match_type(cls, v: Optional[str]) -> Optional[str]:
+        """校验matchType有值时只能为FULL或SEMANTIC"""
+        if v is not None and v not in {"FULL", "SEMANTIC"}:
+            raise ValueError(f"matchType无效：期望FULL/SEMANTIC/null，实际={v}")
+        return v
+
+
+class KeywordConfigItem(BaseModel):
+    """配置项分组，包含配置项ID、名称及其下关键词"""
+    configItemId: str = Field(..., min_length=1, description="后端生成的配置项ID")
+    configItemName: str = Field(..., min_length=1, description="配置项名称")
+    keywords: List[KeywordContentItem] = Field(
+        ...,
+        min_length=1,
+        description="当前配置项下需要算法识别的词库内容",
+    )
+
+
 class ConfigSyncRequest(BaseModel):
     """
     词库配置同步请求体
@@ -163,16 +192,17 @@ class ConfigSyncRequest(BaseModel):
         description="配置版本号，递增字符串",
         examples=["v1.0.0"],
     )
-    items: List[KeywordItem] = Field(
-        ...,
-        min_length=1,
-        description="词库配置明细列表，至少1项",
-        examples=[
-            [
-                {"keyword": "欢迎光临", "category": "greeting", "weight": 1.0},
-                {"keyword": "投诉", "category": "negative", "weight": 2.0},
-            ]
-        ],
+    sop: List[KeywordConfigItem] = Field(
+        default=[],
+        description="SOP话术配置，按服务场景配置项分组",
+    )
+    forbidden: List[KeywordConfigItem] = Field(
+        default=[],
+        description="违禁词配置，按违禁词类型配置项分组",
+    )
+    customer: List[KeywordConfigItem] = Field(
+        default=[],
+        description="顾客关键词配置，按顾客关键词类别配置项分组",
     )
 
     @field_validator("config_type")
@@ -182,6 +212,13 @@ class ConfigSyncRequest(BaseModel):
         if v != "KEYWORD":
             raise ValueError(f"配置类型无效：期望KEYWORD，实际={v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_config_data(self) -> "ConfigSyncRequest":
+        """校验三类词库至少有一类非空"""
+        if not self.sop and not self.forbidden and not self.customer:
+            raise ValueError("sop、forbidden、customer至少有一类不能为空")
+        return self
 
 
 class ConfigSyncResultData(BaseModel):
@@ -223,6 +260,14 @@ class BehaviorResultData(BaseModel):
         description="行为类型枚举：STANDARD / ABNORMAL / CUSTOMER",
     )
     summary: str = Field(..., description="行为摘要，100字以内")
+    config_item_id: str = Field(
+        "",
+        description="命中的配置项ID，回调后端时映射为configItemId",
+    )
+    keyword_content: str = Field(
+        "",
+        description="命中的关键词内容，回调后端时映射为keywordContent",
+    )
     is_abnormal: bool = Field(..., description="是否异常行为")
     abnormal_audio_clip: Optional[str] = Field(
         None,

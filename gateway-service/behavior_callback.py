@@ -19,7 +19,7 @@ Content-Type: multipart/form-data
     步骤1：接收算力节点返回的推理结果（data字段）
     步骤2：调用IdGenerator生成全局唯一eventId
     步骤3：调用TimeFormatter格式化eventTime
-    步骤4：按v3.1文档封装metadata JSON（eventTime、deviceNo、behaviorType、summary）
+    步骤4：按文档封装metadata JSON（eventTime、deviceNo、behaviorType、summary、configItemId、keywordContent）
     步骤5：判断behaviorType是否为ABNORMAL，若是则附加异常音频文件
     步骤6：调用BackendClient发送multipart/form-data到后端
     步骤7：回调失败记录完整日志，不影响主网关运行
@@ -29,7 +29,9 @@ metadata格式（v3.1文档5.2节）：
         "eventTime": "2026-05-08 10:31:00",
         "deviceNo": "BADGE0001",
         "behaviorType": "ABNORMAL",
-        "summary": "员工未按SOP回应顾客问题"
+        "summary": "员工触发服务禁语",
+        "configItemId": "forbidden-service-attitude",
+        "keywordContent": "你自己看"
     }
 
 使用示例：
@@ -45,7 +47,9 @@ metadata格式（v3.1文档5.2节）：
     asyncio.create_task(callback.handle_result(
         inference_data={
             "behavior_type": "ABNORMAL",
-            "summary": "员工未按SOP回应顾客问题",
+            "summary": "员工触发服务禁语",
+            "config_item_id": "forbidden-service-attitude",
+            "keyword_content": "你自己看",
             "is_abnormal": True,
             "abnormal_audio_clip": "UklGRi4AAABX...",
         },
@@ -151,24 +155,34 @@ class BehaviorCallback:
         # ========== 步骤3：调用TimeFormatter格式化eventTime ==========
         formatted_time = self._format_event_time(event_time)
 
-        # ========== 步骤4：按v3.1文档封装metadata JSON ==========
+        # ========== 步骤4：按文档封装metadata JSON ==========
         behavior_type = self._validate_behavior_type(
             inference_data.get("behavior_type", BehaviorType.STANDARD)
         )
         summary = inference_data.get("summary", "")
+        config_item_id = self._first_non_empty(
+            inference_data.get("configItemId"),
+            inference_data.get("config_item_id"),
+        )
+        keyword_content = self._first_non_empty(
+            inference_data.get("keywordContent"),
+            inference_data.get("keyword_content"),
+        )
 
         metadata = {
             "eventTime": formatted_time,
             "deviceNo": device_no,
             "behaviorType": behavior_type,
             "summary": summary,
+            "configItemId": config_item_id,
+            "keywordContent": keyword_content,
         }
         metadata_json = json.dumps(metadata, ensure_ascii=False)
 
         logger.info(
             f"行为识别回调开始 | eventId={event_id} | "
             f"deviceNo={device_no} | behaviorType={behavior_type} | "
-            f"eventTime={formatted_time}"
+            f"eventTime={formatted_time} | configItemId={config_item_id}"
         )
 
         # ========== 步骤5：判断是否为ABNORMAL，附加异常音频文件 ==========
@@ -237,6 +251,17 @@ class BehaviorCallback:
             )
 
     # ==================== 辅助方法 ====================
+
+    @staticmethod
+    def _first_non_empty(*values: Any) -> str:
+        """返回第一个非空字符串值，用于兼容算力节点snake_case和文档camelCase字段。"""
+        for value in values:
+            if value is None:
+                continue
+            value_str = str(value).strip()
+            if value_str:
+                return value_str
+        return ""
 
     @staticmethod
     def _format_event_time(event_time: str) -> str:

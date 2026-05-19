@@ -366,7 +366,13 @@ class LLMModel:
             max_tokens=BEHAVIOR_LLM_MAX_TOKENS,
             stop=BEHAVIOR_LLM_STOP,
             max_retries=BEHAVIOR_LLM_MAX_RETRIES,
-            valid_keys=["behavior_type", "summary", "is_abnormal"],
+            valid_keys=[
+                "behavior_type",
+                "summary",
+                "config_item_id",
+                "keyword_content",
+                "is_abnormal",
+            ],
         )
 
     async def diagnosis_inference(
