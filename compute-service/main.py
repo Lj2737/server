@@ -46,12 +46,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.error(f"ASR模型预加载失败 | 错误={asr_model.load_error}")
 
-    # 预加载LLM模型（qwen2.5-1.5b-instruct-q4_k_m.gguf）
+    # 初始化LLM API客户端
     llm_loaded = await llm_model.load()
     if llm_loaded:
-        logger.info("LLM模型预加载成功")
+        logger.info("LLM API客户端初始化成功")
     else:
-        logger.error(f"LLM模型预加载失败 | 错误={llm_model.load_error}")
+        logger.error(f"LLM API客户端初始化失败 | 错误={llm_model.load_error}")
 
     # 模型加载状态汇总
     if asr_loaded and llm_loaded:
@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="智能胸牌服务管理系统 - 算力节点",
     description=(
-        "算力节点推理服务，部署ASR+LLM模型。"
+        "算力节点推理服务，部署ASR并通过API调用LLM。"
         "仅与主网关通信，不直接对接后端。"
         "部署架构：1台主树莓派（网关） + 4台从树莓派（算力）"
     ),

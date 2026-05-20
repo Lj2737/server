@@ -8,7 +8,7 @@
 5. 词库配置同步广播（内部方法，非对外接口）
 
 v3.1变更：
-- diagnosis-summary诊断推理通过NodeManager转发到算力节点本地LLM
+- diagnosis-summary诊断推理通过NodeManager转发到算力节点，由算力节点调用LLM API
 - 移除PiperTTSManager和WebSocketDeviceManager（已迁移到duty_broadcast_router）
 - 行为识别回调路径改为 /badge/v1/internal/ai/voice-behaviors
 """

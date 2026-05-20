@@ -4,7 +4,7 @@
 1. WebSocket端点：胸牌硬件通过 WS /badge/v1/algorithm/ws/device/{deviceNo} 连接主网关
 2. POST接口：后端调用 POST /badge/v1/algorithm/duty-broadcasts/tts 触发播报
 3. 入参校验：deviceNo非空且长度≤20，broadcastContent非空且长度≤200字
-4. 联动逻辑：入参校验 → TTS可用性检查 → 设备在线检查 → 流式合成 → 流式推送
+4. 联动逻辑：入参校验 → TTS可用性检查 → 设备在线检查 → 非流式合成 → 分块推送
 
 接口规范（对齐v3.1文档6.2节）：
 - 接口路径：POST /badge/v1/algorithm/duty-broadcasts/tts
@@ -20,7 +20,7 @@ WebSocket端点：
     ① 入参校验：deviceNo非空且长度≤20，broadcastContent非空且长度≤200字
     ② 检查TTS服务可用性：不可用返回success=false
     ③ 检查设备在线状态：不在线返回success=false
-    ④ 调用PiperTTSManager.synthesize_stream获取本地PCM音频流
+    ④ 调用PiperTTSManager.synthesize_stream获取TTS API音频分块
     ⑤ 调用WebSocketDeviceManager.push_audio_stream流式推送给对应设备
     ⑥ 推送完成返回success=true；任何步骤失败返回success=false
 
@@ -225,7 +225,7 @@ async def duty_broadcast_tts(request: DutyBroadcastRequest):
     ① 入参校验：deviceNo非空且长度≤20，broadcastContent非空且长度≤200字
     ② 检查TTS服务可用性：不可用返回success=false
     ③ 检查设备在线状态：不在线返回success=false
-    ④ 调用PiperTTSManager.synthesize_stream获取本地PCM音频流
+    ④ 调用PiperTTSManager.synthesize_stream获取TTS API音频分块
     ⑤ 调用WebSocketDeviceManager.push_audio_stream流式推送给对应设备
     ⑥ 推送完成返回success=true；任何步骤失败返回success=false
 
@@ -291,7 +291,7 @@ async def duty_broadcast_tts(request: DutyBroadcastRequest):
 
     # ========== ④⑤ 流式合成 + 流式推送 ==========
     try:
-        # 获取本地Piper TTS音频流（异步生成器）
+        # 获取TTS API音频分块（异步生成器）
         audio_stream = piper_tts_manager.synthesize_stream(broadcast_content)
 
         # 流式推送到设备

@@ -9,8 +9,8 @@ v3.2架构变更：
 - 新增知识库ID本地缓存（24小时TTL）
 - 新增BackendClient便捷方法：report_dialog_completion、get_knowledge_base_id
 
-值班播报架构（v9原版）：
-- 后端→网关调用Piper本地TTS合成→WebSocket流式推送胸牌→返回success
+值班播报架构：
+- 后端→网关调用非流式TTS API合成→WebSocket分块推送胸牌→返回success
 
 硬件状态上报架构（v3.1）：
 - 硬件→算法：POST /badge/v1/internal/hardware/device-events（格式校验+缓存+透传）
@@ -62,7 +62,7 @@ from exception import (
     gateway_exception_handler,
     GatewayException,
 )
-# 值班播报模块（Piper本地TTS + WebSocket推送）
+# 值班播报模块（TTS API + WebSocket推送）
 from duty_broadcast_router import (
     ws_router,
     piper_tts_manager,
@@ -92,8 +92,8 @@ async def lifespan(app: FastAPI):
     - startup：初始化日志系统、预建httpx连接池、启动算力节点健康检查、
               初始化后端客户端、初始化行为识别回调、初始化AI对话完成回调、
               初始化AI诊断处理器、初始化词库配置同步处理器、
-              初始化PiperTTSManager、启动WebSocket设备心跳
-    - shutdown：停止心跳、释放PiperTTS资源、关闭所有WebSocket连接、
+              初始化TTS API客户端、启动WebSocket设备心跳
+    - shutdown：停止心跳、释放TTS API客户端、关闭所有WebSocket连接、
                停止健康检查、关闭httpx连接池、关闭后端客户端
     """
     # ========== 启动阶段 ==========
@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI):
     # ========== 初始化AI诊断处理器（注入NodeManager，转发到算力节点） ==========
     diagnosis_handler.initialize(node_manager=node_manager)
     logger.info(
-        f"AI诊断处理器已初始化 | 推理方式=算力节点本地LLM | "
+        f"AI诊断处理器已初始化 | 推理方式=算力节点调用LLM API | "
         f"内部路径={DIAGNOSIS_INTERNAL_PATH} | "
         f"超时={DIAGNOSIS_REQUEST_TIMEOUT}s"
     )
@@ -144,13 +144,13 @@ async def lifespan(app: FastAPI):
         f"内部路径={CONFIG_SYNC_INTERNAL_PATH}"
     )
 
-    # ========== 初始化PiperTTSManager（本地TTS模型） ==========
+    # ========== 初始化TTS API客户端 ==========
     piper_load_success = await piper_tts_manager.load_model()
     if piper_load_success:
-        logger.info("Piper TTS模型加载成功，值班播报功能可用")
+        logger.info("TTS API客户端初始化成功，值班播报功能可用")
     else:
         logger.error(
-            f"Piper TTS模型加载失败 | "
+            f"TTS API客户端初始化失败 | "
             f"错误={piper_tts_manager.load_error} | "
             f"值班播报功能不可用，其他功能正常"
         )
@@ -228,9 +228,9 @@ async def lifespan(app: FastAPI):
     await ws_device_manager.close_all()
     logger.info("WebSocket设备管理器已关闭")
 
-    # 释放PiperTTSManager资源
+    # 释放TTS API客户端资源
     piper_tts_manager.release()
-    logger.info("Piper TTS模型资源已释放")
+    logger.info("TTS API客户端资源已释放")
 
     # 关闭后端通用客户端，释放连接池资源
     await backend_client.close()
@@ -253,7 +253,7 @@ app = FastAPI(
     description=(
         "算法侧网关服务，负责请求路由、负载均衡、结果汇总。"
         "部署架构：1台主树莓派（网关） + 4台从树莓派（算力）\n"
-        "v3.2：算力节点本地LLM诊断 + Piper本地TTS播报 + 异常录音合并到voice-behaviors"
+        "v3.2：算力节点调用LLM API诊断 + TTS API播报 + 异常录音合并到voice-behaviors"
     ),
     version="3.2.0",
     lifespan=lifespan,

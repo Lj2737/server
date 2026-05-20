@@ -16,6 +16,30 @@ v3.1更新：
 - 新增 AI对话完成回调接口（dialog-completions）
 """
 from typing import List, Dict
+import os
+
+from env_loader import load_env_file
+
+
+load_env_file()
+
+
+def _env_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 # ==================== 服务配置 ====================
@@ -34,6 +58,7 @@ COMPUTE_NODES: List[str] = [
     # "192.168.1.102:8091",  # 树莓派算力节点2
     # "192.168.1.103:8091",  # 树莓派算力节点3
     # "192.168.1.104:8091",  # 树莓派算力节点4
+    
 ]
 
 # 单台算力节点最大并发数
@@ -227,25 +252,27 @@ TTS_REQUEST_TIMEOUT: float = 30.0
 TTS_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/tts/broadcast"
 
 
-# ==================== Piper TTS本地部署配置 ====================
-# Piper TTS模型文件路径（ONNX格式）
-PIPER_MODEL_PATH: str = "compute-service/models/zh_CN-huayan-medium/model.onnx"
-# Piper TTS模型配置文件路径（JSON格式）
-PIPER_CONFIG_PATH: str = "compute-service/models/zh_CN-huayan-medium/model.onnx.json"
-# 是否使用CUDA加速（树莓派仅CPU，强制False）
-PIPER_USE_CUDA: bool = False
+# ==================== TTS API配置 ====================
+# OpenAI-compatible Speech接口地址，例如 https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech
+TTS_API_BASE_URL: str = _env_str("TTS_API_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech")
+# API Key必须通过环境变量或 gateway-service/.env 配置
+TTS_API_KEY: str = _env_str("TTS_API_KEY")
+# 模型名
+TTS_MODEL_NAME: str = _env_str("TTS_MODEL_NAME", "qwen3.6-flash")
+# 音色/发音人，按供应商支持的值配置
+TTS_VOICE: str = _env_str("TTS_VOICE", "Cherry")
+# 请求超时（秒）
+TTS_API_TIMEOUT: float = _env_float("TTS_API_TIMEOUT", 60.0)
+# 期望API返回格式：pcm / wav / mp3 等。设备直推建议pcm或wav。
+TTS_RESPONSE_FORMAT: str = _env_str("TTS_RESPONSE_FORMAT", "wav")
 # 目标音频采样率（Hz），硬件直接播放要求16000Hz
-PIPER_TARGET_SAMPLE_RATE: int = 16000
-# 目标音频采样位深（字节），16bit = 2字节
-PIPER_TARGET_SAMPLE_WIDTH: int = 2
-# 目标音频声道数，单声道
-PIPER_TARGET_CHANNELS: int = 1
-# Piper合成参数：噪声缩放
-PIPER_NOISE_SCALE: float = 0.667
-# Piper合成参数：语速缩放
-PIPER_LENGTH_SCALE: float = 1.0
-# Piper合成参数：音量倍数
-PIPER_VOLUME: float = 1.0
+TTS_TARGET_SAMPLE_RATE: int = _env_int("TTS_TARGET_SAMPLE_RATE", 16000)
+# 目标采样位深（字节），16bit = 2字节
+TTS_TARGET_SAMPLE_WIDTH: int = _env_int("TTS_TARGET_SAMPLE_WIDTH", 2)
+# 目标声道数，单声道
+TTS_TARGET_CHANNELS: int = _env_int("TTS_TARGET_CHANNELS", 1)
+# WebSocket推送chunk大小
+TTS_PUSH_CHUNK_SIZE: int = _env_int("TTS_PUSH_CHUNK_SIZE", 4096)
 
 
 # ==================== WebSocket设备连接管理配置 ====================

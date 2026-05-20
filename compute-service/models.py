@@ -2,16 +2,18 @@
 智能胸牌服务管理系统 - 模型加载与推理
 核心功能：
 1. 服务启动时预加载ASR模型（sherpa-onnx-sense-voice-small）
-2. 服务启动时预加载LLM模型（qwen2.5-1.5b-instruct-q4_k_m.gguf）
+2. 服务启动时初始化LLM API客户端（deepseek-v4-flash）
 3. 模型加载失败时标记服务不可用
 4. ASR推理：音频→中文文本（带标点）
 5. LLM推理：文本→结构化JSON结果
-6. 使用asyncio.to_thread包装推理调用，避免阻塞FastAPI事件循环
+6. 使用异步HTTP调用，避免阻塞FastAPI事件循环
 """
 import asyncio
 import json
+import re
 from typing import Any, Dict, List, Optional
 
+import httpx
 from loguru import logger
 
 from config import (
@@ -22,11 +24,10 @@ from config import (
     ASR_NUM_THREADS,
     ASR_PROVIDER,
     ASR_TIMEOUT,
-    LLM_MODEL_PATH,
-    LLM_N_CTX,
-    LLM_N_THREADS,
-    LLM_N_THREADS_BATCH,
-    LLM_VERBOSE,
+    LLM_API_BASE_URL,
+    LLM_API_KEY,
+    LLM_MODEL_NAME,
+    LLM_API_TIMEOUT,
     BEHAVIOR_LLM_TEMPERATURE,
     BEHAVIOR_LLM_MAX_TOKENS,
     BEHAVIOR_LLM_STOP,
@@ -256,69 +257,72 @@ class ASRModel:
 
 class LLMModel:
     """
-    LLM模型封装（qwen2.5-1.5b-instruct-q4_k_m.gguf）
-    - 启动时加载模型，避免每次请求加载
-    - 行为识别和诊断总结共用同一个模型实例
-    - 提供异步推理接口，使用asyncio.to_thread包装
+    LLM API封装（OpenAI-compatible Chat Completions）
+    - 启动时校验API配置并初始化HTTP客户端
+    - 行为识别和诊断总结共用同一个客户端
+    - 提供异步推理接口
     - 支持JSON输出校验，校验失败自动重试
-    - 树莓派优化参数：n_ctx=2048, n_threads=4, n_threads_batch=2
     """
 
     def __init__(self):
         """初始化LLM模型"""
-        self._llm = None
+        self._client: Optional[httpx.AsyncClient] = None
         self._is_loaded = False
         self._load_error: Optional[str] = None
 
+    @staticmethod
+    def _mask_secret(secret: str) -> str:
+        """Return a non-sensitive preview for logs."""
+        if not secret:
+            return "empty"
+        if len(secret) <= 10:
+            return f"len={len(secret)}"
+        return f"{secret[:6]}...{secret[-4:]}(len={len(secret)})"
+
+    @staticmethod
+    def _chat_completions_url(base_url: str) -> str:
+        """Accept either an API base URL or a full chat completions endpoint."""
+        normalized = (base_url or "").strip().rstrip("/")
+        if not normalized:
+            return "https://api.deepseek.com/chat/completions"
+        if normalized.endswith("/chat/completions"):
+            return normalized
+        return f"{normalized}/chat/completions"
+
     async def load(self) -> bool:
         """
-        加载LLM模型
+        初始化LLM API客户端
         在服务启动时调用
 
         Returns:
             是否加载成功
         """
         try:
-            logger.info(f"开始加载LLM模型 | 路径={LLM_MODEL_PATH}")
+            if not LLM_API_KEY or LLM_API_KEY.startswith("replace-with-"):
+                raise RuntimeError("LLM_API_KEY未配置，请在compute-service/.env中设置")
 
-            # 使用asyncio.to_thread在子线程中加载模型
-            self._llm = await asyncio.to_thread(self._load_model_sync)
-
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(LLM_API_TIMEOUT),
+                headers={
+                    "Authorization": f"Bearer {LLM_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
             self._is_loaded = True
-            logger.info("LLM模型加载成功")
+            self._load_error = None
+            chat_url = self._chat_completions_url(LLM_API_BASE_URL)
+            logger.info(
+                f"LLM API客户端初始化成功 | model={LLM_MODEL_NAME} | "
+                f"url={chat_url} | timeout={LLM_API_TIMEOUT}s | "
+                f"key={self._mask_secret(LLM_API_KEY)}"
+            )
             return True
 
         except Exception as e:
             self._is_loaded = False
             self._load_error = str(e)
-            logger.error(f"LLM模型加载失败 | 错误={e}")
+            logger.error(f"LLM API客户端初始化失败 | 错误={e}")
             return False
-
-    def _load_model_sync(self):
-        """
-        同步加载LLM模型（在子线程中执行）
-        使用llama-cpp-python库加载GGUF模型
-        """
-        try:
-            from llama_cpp import Llama
-        except ImportError:
-            raise RuntimeError(
-                "llama-cpp-python库未安装，请执行：pip install llama-cpp-python"
-            )
-
-        import os
-        if not os.path.exists(LLM_MODEL_PATH):
-            raise FileNotFoundError(f"LLM模型文件未找到 | 路径={LLM_MODEL_PATH}")
-
-        # 创建LLM实例，使用树莓派优化参数
-        llm = Llama(
-            model_path=LLM_MODEL_PATH,
-            n_ctx=LLM_N_CTX,              # 上下文窗口大小
-            n_threads=LLM_N_THREADS,       # 推理线程数（树莓派5B核心数）
-            n_threads_batch=LLM_N_THREADS_BATCH,  # 批处理线程数
-            verbose=LLM_VERBOSE,           # 禁止详细日志
-        )
-        return llm
 
     @property
     def is_loaded(self) -> bool:
@@ -349,8 +353,8 @@ class LLMModel:
         Raises:
             RuntimeError: LLM推理失败或输出格式无效
         """
-        if not self._is_loaded:
-            raise RuntimeError("LLM模型未加载，无法执行推理")
+        if not self._is_loaded or self._client is None:
+            raise RuntimeError("LLM API客户端未初始化，无法执行推理")
 
         # 构造prompt
         user_prompt = BEHAVIOR_USER_PROMPT_TEMPLATE.format(
@@ -401,8 +405,8 @@ class LLMModel:
         Raises:
             RuntimeError: LLM推理失败或输出格式无效
         """
-        if not self._is_loaded:
-            raise RuntimeError("LLM模型未加载，无法执行推理")
+        if not self._is_loaded or self._client is None:
+            raise RuntimeError("LLM API客户端未初始化，无法执行推理")
 
         # 构造prompt
         user_prompt = DIAGNOSIS_USER_PROMPT_TEMPLATE.format(
@@ -458,14 +462,21 @@ class LLMModel:
 
         for attempt in range(1 + max_retries):
             try:
-                # 使用asyncio.to_thread在子线程中执行推理
-                raw_output = await asyncio.to_thread(
-                    self._inference_sync,
+                retry_user_prompt = user_prompt
+                if attempt > 0 and last_error is not None:
+                    retry_user_prompt = (
+                        f"{user_prompt}\n\n"
+                        "The previous response was not valid JSON. "
+                        "Return only one strict JSON object. "
+                        "Use double quotes for every property name and string. "
+                        "Do not use trailing commas, markdown, comments, or explanations."
+                    )
+
+                raw_output = await self._inference_api(
                     system_prompt,
-                    user_prompt,
+                    retry_user_prompt,
                     temperature,
                     max_tokens,
-                    stop,
                 )
 
                 # 解析JSON输出
@@ -485,9 +496,10 @@ class LLMModel:
 
             except (json.JSONDecodeError, ValueError) as e:
                 last_error = e
+                raw_preview = raw_output[:500].replace("\n", "\\n") if "raw_output" in locals() else ""
                 logger.warning(
                     f"LLM输出JSON校验失败 | 尝试={attempt + 1}/{1 + max_retries} | "
-                    f"错误={e}"
+                    f"error={e} | raw={raw_preview}"
                 )
                 if attempt < max_retries:
                     # 重试前稍等，避免立即重试得到相同结果
@@ -502,30 +514,79 @@ class LLMModel:
             f"LLM输出格式校验失败（已重试{max_retries}次）| 最后错误={last_error}"
         )
 
-    def _inference_sync(
+    async def _inference_api(
         self,
         system_prompt: str,
         user_prompt: str,
         temperature: float,
         max_tokens: int,
-        stop: List[str],
     ) -> str:
         """
-        同步LLM推理（在子线程中执行）
-        使用llama-cpp-python的create_chat_completion接口
+        调用OpenAI-compatible Chat Completions接口。
         """
-        result = self._llm.create_chat_completion(
-            messages=[
+        if self._client is None:
+            raise RuntimeError("LLM API客户端未初始化")
+
+        payload = {
+            "model": LLM_MODEL_NAME,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=stop,
-        )
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
+        }
 
-        # 提取生成的文本
-        content = result["choices"][0]["message"]["content"]
+        # These endpoints require strict JSON in message.content. DeepSeek's
+        # thinking mode can return an empty content field or non-JSON reasoning
+        # text, so keep structured output calls in non-thinking mode.
+
+        chat_url = self._chat_completions_url(LLM_API_BASE_URL)
+        response = await self._client.post(chat_url, json=payload)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if response.status_code == 401:
+                raise RuntimeError(
+                    "LLM API authentication failed (401). Check compute-service/.env "
+                    "LLM_API_KEY/DEEPSEEK_API_KEY and model access; "
+                    f"current key={self._mask_secret(LLM_API_KEY)}, url={chat_url}"
+                ) from e
+            raise
+        result = response.json()
+        choice = result.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        if not content.strip():
+            response_preview = json.dumps(result, ensure_ascii=False)[:800]
+            for fallback_value in (
+                message.get("reasoning_content"),
+                message.get("reasoning"),
+                message.get("output_text"),
+                message.get("text"),
+                choice.get("text"),
+            ):
+                if isinstance(fallback_value, str) and "{" in fallback_value:
+                    json_fallback = self._extract_json_object(fallback_value)
+                    if json_fallback and json_fallback.strip().startswith("{"):
+                        return json_fallback.strip()
+            logger.warning(
+                "LLM API returned empty message.content | "
+                f"finish_reason={choice.get('finish_reason')} | "
+                f"message_keys={list(message.keys())} | response={response_preview}"
+            )
+            raise RuntimeError(
+                "LLM API returned empty message.content. Structured JSON calls "
+                "must run without thinking/reasoning output."
+            )
         return content.strip()
 
     @staticmethod
@@ -559,15 +620,77 @@ class LLMModel:
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
 
-        return json.loads(text)
+        candidates = [text]
+        extracted = LLMModel._extract_json_object(text)
+        if extracted and extracted != text:
+            candidates.append(extracted)
+
+        last_error: Optional[json.JSONDecodeError] = None
+        for candidate in candidates:
+            for cleaned in (candidate, LLMModel._sanitize_json_text(candidate)):
+                try:
+                    parsed = json.loads(cleaned)
+                    if not isinstance(parsed, dict):
+                        raise ValueError("LLM output JSON root must be an object")
+                    return parsed
+                except json.JSONDecodeError as e:
+                    last_error = e
+
+        if last_error is not None:
+            raise last_error
+        raise json.JSONDecodeError("No JSON object found", text, 0)
+
+    @staticmethod
+    def _extract_json_object(text: str) -> str:
+        start = text.find("{")
+        if start < 0:
+            return text
+
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:index + 1]
+
+        return text[start:]
+
+    @staticmethod
+    def _sanitize_json_text(text: str) -> str:
+        cleaned = text.strip()
+        cleaned = cleaned.replace("\ufeff", "")
+        cleaned = cleaned.translate({0x201C: 34, 0x201D: 34, 0x2018: 39, 0x2019: 39})
+        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+        cleaned = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', cleaned)
+        return cleaned
 
     def release(self) -> None:
-        """释放LLM模型资源"""
-        if self._llm is not None:
-            del self._llm
-            self._llm = None
+        """释放LLM API客户端引用。"""
+        if self._client is not None:
+            try:
+                if not self._client.is_closed:
+                    asyncio.create_task(self._client.aclose())
+            except RuntimeError:
+                pass
+            self._client = None
         self._is_loaded = False
-        logger.info("LLM模型资源已释放")
+        logger.info("LLM API客户端已释放")
 
 
 # ==================== 全局模型实例 ====================

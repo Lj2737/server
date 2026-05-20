@@ -8,8 +8,8 @@
 5. 完整日志记录全链路交互
 
 处理流程：
-- 诊断推理通过NodeManager转发到算力节点本地LLM模型
-- 算力节点运行本地LLM推理并返回诊断结果
+- 诊断推理通过NodeManager转发到算力节点
+- 算力节点调用LLM API并返回诊断结果
 - 网关同步返回结果，超时60秒
 
 对应后端接口：POST /badge/v1/algorithm/users/diagnosis-summary

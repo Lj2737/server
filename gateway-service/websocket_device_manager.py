@@ -204,7 +204,7 @@ class WebSocketDeviceManager:
 
         Args:
             device_no: 设备编号
-            audio_stream: PCM音频异步生成器（由PiperTTSManager.synthesize_stream返回）
+            audio_stream: 音频异步生成器（由PiperTTSManager.synthesize_stream返回）
             broadcast_content: 播报内容文本（用于通知设备播报内容，可选）
 
         Returns:

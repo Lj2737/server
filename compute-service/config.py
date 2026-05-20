@@ -1,9 +1,40 @@
 """
 智能胸牌服务管理系统 - 算力节点配置文件
 所有配置项集中管理，禁止硬编码
-部署架构：4台从树莓派（算力节点），每台完整部署ASR+LLM推理服务
+部署架构：4台从树莓派（算力节点），每台完整部署ASR并通过API调用LLM
 """
+import os
 from typing import List, Dict
+
+from env_loader import load_env_file
+
+
+load_env_file()
+
+
+def _env_str(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ==================== 服务配置 ====================
@@ -60,39 +91,42 @@ ASR_PROVIDER: str = "cpu"
 ASR_TIMEOUT: float = 10.0
 
 
-# ==================== LLM模型配置（qwen2.5-1.5b-instruct-q4_k_m.gguf） ====================
-# GGUF模型文件路径
-LLM_MODEL_PATH: str = "E:/Project-python/server/compute-service/models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
-# 上下文窗口大小
-LLM_N_CTX: int = 2048
-# 推理线程数（树莓派5B核心数）
-LLM_N_THREADS: int = 4
-# 批处理线程数
-LLM_N_THREADS_BATCH: int = 2
-# 是否输出详细日志
-LLM_VERBOSE: bool = False
+# ==================== LLM API配置 ====================
+# OpenAI-compatible base URL, for example https://api.deepseek.com.
+# If a full /chat/completions URL is configured, the caller keeps using it as-is.
+LLM_API_BASE_URL: str = _env_str("LLM_API_BASE_URL", "https://api.deepseek.com")
+# API Key必须通过环境变量或 compute-service/.env 配置；兼容DEEPSEEK_API_KEY别名
+LLM_API_KEY: str = _env_str("LLM_API_KEY") or _env_str("DEEPSEEK_API_KEY")
+# 模型名
+LLM_MODEL_NAME: str = _env_str("LLM_MODEL_NAME", "deepseek-v4-flash")
+# 请求超时（秒）
+LLM_API_TIMEOUT: float = _env_float("LLM_API_TIMEOUT", 60.0)
+# Optional DeepSeek reasoning parameters. These mirror the tested OpenAI SDK call:
+# reasoning_effort="high", extra_body={"thinking": {"type": "enabled"}}.
+LLM_REASONING_EFFORT: str = _env_str("LLM_REASONING_EFFORT", "")
+LLM_THINKING_ENABLED: bool = _env_bool("LLM_THINKING_ENABLED", False)
 
 
 # ==================== 行为识别LLM推理参数 ====================
 # 温度（低随机性，保证输出稳定）
-BEHAVIOR_LLM_TEMPERATURE: float = 0.1
+BEHAVIOR_LLM_TEMPERATURE: float = _env_float("BEHAVIOR_LLM_TEMPERATURE", 0.1)
 # 最大输出token数
-BEHAVIOR_LLM_MAX_TOKENS: int = 256
+BEHAVIOR_LLM_MAX_TOKENS: int = _env_int("BEHAVIOR_LLM_MAX_TOKENS", 512)
 # 停止标记
 BEHAVIOR_LLM_STOP: List[str] = ["<|im_end|>"]
 # JSON输出校验失败后最大重试次数
-BEHAVIOR_LLM_MAX_RETRIES: int = 1
+BEHAVIOR_LLM_MAX_RETRIES: int = _env_int("BEHAVIOR_LLM_MAX_RETRIES", 1)
 
 
 # ==================== 诊断总结LLM推理参数 ====================
 # 温度（略高于行为识别，允许一定创造性但不过度发散）
-DIAGNOSIS_LLM_TEMPERATURE: float = 0.3
+DIAGNOSIS_LLM_TEMPERATURE: float = _env_float("DIAGNOSIS_LLM_TEMPERATURE", 0.3)
 # 最大输出token数（诊断总结需要更长输出）
-DIAGNOSIS_LLM_MAX_TOKENS: int = 512
+DIAGNOSIS_LLM_MAX_TOKENS: int = _env_int("DIAGNOSIS_LLM_MAX_TOKENS", 1024)
 # 停止标记
 DIAGNOSIS_LLM_STOP: List[str] = ["<|im_end|>"]
 # JSON输出校验失败后最大重试次数
-DIAGNOSIS_LLM_MAX_RETRIES: int = 1
+DIAGNOSIS_LLM_MAX_RETRIES: int = _env_int("DIAGNOSIS_LLM_MAX_RETRIES", 1)
 
 
 # ==================== 音频格式要求 ====================

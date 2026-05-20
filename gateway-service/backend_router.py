@@ -6,7 +6,7 @@
 2. 功能4：接收后端词库配置同步
    - POST /badge/v1/algorithm/config/sync
 
-功能5值班播报已迁移到 duty_broadcast_router.py（Piper TTS本地合成 + WebSocket推送）
+功能5值班播报已迁移到 duty_broadcast_router.py（TTS API合成 + WebSocket推送）
 
 这些接口是后端主动调用算法的入口（区别于功能1/2的算法主动回调后端）
 路由前缀统一为 /badge/v1/algorithm/，对齐文档后端→算法的接口规范
