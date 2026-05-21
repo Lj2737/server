@@ -33,8 +33,13 @@ WebSocket端点：
     #   -H "Content-Type: application/json" \
     #   -d '{"deviceNo":"BADGE0001","broadcastContent":"播报内容"}'
 """
+import asyncio
+import io
+import json
 import time
+import wave
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -42,38 +47,39 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from config import (
+    AI_DIALOG_CHANNELS,
+    AI_DIALOG_INTERNAL_PATH,
+    AI_DIALOG_MAX_AUDIO_SECONDS,
+    AI_DIALOG_REQUEST_TIMEOUT,
+    AI_DIALOG_SAMPLE_RATE,
+    AI_DIALOG_SAMPLE_WIDTH,
     BROADCAST_DEVICE_NO_MAX_LENGTH,
     BROADCAST_CONTENT_MAX_LENGTH,
 )
+from http_client import HttpClientSingleton
+from node_manager import NodeManager
 from piper_tts_manager import PiperTTSManager
+from utils import BackendClient
 from websocket_device_manager import WebSocketDeviceManager
 
 
 # ==================== Pydantic 请求模型 ====================
 
 class DutyBroadcastRequest(BaseModel):
-    """
-    值班播报文字转语音请求体模型
-    后端 → 主网关，Content-Type: application/json
-    严格对齐v3.1文档6.2节后端请求必传字段
-
-    必传字段：
-    - deviceNo: 设备编号，非空，长度≤20
-    - broadcastContent: 播报内容，非空，长度≤200字
-    """
+    """Backend request body for TTS broadcast."""
     deviceNo: str = Field(
         ...,
         min_length=1,
         max_length=BROADCAST_DEVICE_NO_MAX_LENGTH,
-        description="设备编号",
+        description="Device number",
         examples=["BADGE0001"],
     )
     broadcastContent: str = Field(
         ...,
         min_length=1,
         max_length=BROADCAST_CONTENT_MAX_LENGTH,
-        description="播报内容，最多200字",
-        examples=["王五需要去做前厅消防通道检查，请及时完成"],
+        description="Broadcast text, max 200 characters",
+        examples=["Please check the front hall fire passage."],
     )
 
 
@@ -93,6 +99,16 @@ ws_router = APIRouter(
 # 处理器单例（由 main.py 在 lifespan 中初始化后赋值）
 piper_tts_manager = PiperTTSManager()
 ws_device_manager = WebSocketDeviceManager()
+node_manager = NodeManager()
+_backend_client: Optional[BackendClient] = None
+_dialog_sessions: Dict[str, Dict[str, Any]] = {}
+
+
+def initialize_ai_dialog(backend_client: BackendClient) -> None:
+    """Inject backend client for knowledge-base lookup and dialog completion callback."""
+    global _backend_client
+    _backend_client = backend_client
+    logger.info("AI dialog WebSocket pipeline initialized")
 
 
 # ==================== WebSocket端点：胸牌设备连接 ====================
@@ -143,17 +159,35 @@ async def device_websocket(websocket: WebSocket, device_no: str):
                         f"设备文本消息 | deviceNo={device_no} | "
                         f"内容={text[:200]}"
                     )
-                    # 【预留扩展位】播报回执处理
+                    await _handle_device_message(device_no, websocket, text)
                     # TODO: 与硬件确认回执格式后实现
-                    # 示例回执格式：{"type":"broadcast_ack","success":true}
-                    _handle_device_message(device_no, text)
-
                 elif "bytes" in data:
-                    # 二进制消息：暂不处理
-                    logger.debug(
-                        f"设备二进制消息 | deviceNo={device_no} | "
-                        f"长度={len(data['bytes'])}"
-                    )
+                    binary = data["bytes"]
+                    if device_no in _dialog_sessions:
+                        session = _dialog_sessions[device_no]
+                        session["chunks"].append(binary)
+                        session["total_bytes"] += len(binary)
+                        if session["total_bytes"] > _max_dialog_audio_bytes():
+                            dialog_id = session.get("dialog_id", "")
+                            _dialog_sessions.pop(device_no, None)
+                            await ws_device_manager.send_text(
+                                device_no,
+                                {
+                                    "type": "dialog_error",
+                                    "dialogId": dialog_id,
+                                    "message": "dialog audio exceeds max duration",
+                                },
+                            )
+                        else:
+                            logger.debug(
+                                f"AI dialog audio chunk | deviceNo={device_no} | "
+                                f"dialogId={session.get('dialog_id')} | bytes={len(binary)} | "
+                                f"total={session['total_bytes']}"
+                            )
+                    else:
+                        logger.debug(
+                            f"device binary message | deviceNo={device_no} | length={len(binary)}"
+                        )
 
                 elif data.get("type") == "websocket.disconnect":
                     logger.info(
@@ -172,46 +206,159 @@ async def device_websocket(websocket: WebSocket, device_no: str):
         await ws_device_manager.unregister_device(device_no)
 
 
-def _handle_device_message(device_no: str, text: str) -> None:
-    """
-    处理设备发送的文本消息
-
-    消息类型：
-    - {"type":"pong"}：心跳回复（更新设备last_pong_time）
-    - {"type":"broadcast_ack"}：播报回执（预留扩展）
-    - 其他：记录日志
-
-    Args:
-        device_no: 设备编号
-        text: 消息文本
-    """
+async def _handle_device_message(device_no: str, websocket: WebSocket, text: str) -> None:
+    """Handle device text messages, including AI dialog control frames."""
     try:
-        import json
         msg = json.loads(text)
         msg_type = msg.get("type", "unknown")
 
         if msg_type == "pong":
-            # 心跳回复，更新last_pong_time
             ws_device_manager.handle_pong(device_no)
-            logger.debug(f"设备pong回复 | deviceNo={device_no}")
+            logger.debug(f"device pong | deviceNo={device_no}")
             return
 
-        logger.info(
-            f"设备消息处理 | deviceNo={device_no} | "
-            f"type={msg_type} | 原始={text[:200]}"
-        )
+        if msg_type == "dialog_start":
+            dialog_id = str(msg.get("dialogId", "")).strip()
+            payload_device_no = str(msg.get("deviceNo", device_no)).strip()
+            if not dialog_id:
+                await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": "", "success": False, "message": "dialogId is required"})
+                return
+            if payload_device_no and payload_device_no != device_no:
+                await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": False, "message": "deviceNo does not match websocket path"})
+                return
 
-        # 【预留扩展位】播报回执处理
-        # 需要和硬件确认：
-        # 1. 播报成功是否需要回执？
-        # 2. 播报失败回执格式？
-        # 3. 播报超时判定逻辑？
+            _dialog_sessions[device_no] = {
+                "dialog_id": dialog_id,
+                "chunks": [],
+                "total_bytes": 0,
+                "started_at": time.time(),
+            }
+            await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": True})
+            logger.info(f"AI dialog started | deviceNo={device_no} | dialogId={dialog_id}")
+            return
+
+        if msg_type == "dialog_end":
+            dialog_id = str(msg.get("dialogId", "")).strip()
+            session = _dialog_sessions.pop(device_no, None)
+            if not session:
+                await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "dialog session not found"})
+                return
+            if dialog_id and dialog_id != session.get("dialog_id"):
+                await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "dialogId does not match active session"})
+                return
+
+            pcm_bytes = b"".join(session["chunks"])
+            if not pcm_bytes:
+                await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": session["dialog_id"], "message": "dialog audio is empty"})
+                return
+
+            asyncio.create_task(
+                _handle_ai_dialog_task(device_no=device_no, dialog_id=session["dialog_id"], pcm_bytes=pcm_bytes),
+                name=f"ai-dialog-{device_no}-{session['dialog_id']}",
+            )
+            logger.info(f"AI dialog audio accepted | deviceNo={device_no} | dialogId={session['dialog_id']} | bytes={len(pcm_bytes)}")
+            return
+
+        logger.info(f"device text message | deviceNo={device_no} | type={msg_type} | raw={text[:200]}")
 
     except Exception as e:
-        logger.warning(
-            f"设备消息解析失败 | deviceNo={device_no} | "
-            f"内容={text[:100]} | 错误={str(e)[:100]}"
-        )
+        logger.warning(f"device message parse failed | deviceNo={device_no} | content={text[:100]} | error={str(e)[:100]}")
+
+
+def _max_dialog_audio_bytes() -> int:
+    return AI_DIALOG_SAMPLE_RATE * AI_DIALOG_SAMPLE_WIDTH * AI_DIALOG_CHANNELS * AI_DIALOG_MAX_AUDIO_SECONDS
+
+
+def _pcm_to_wav(pcm_bytes: bytes) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wf:
+        wf.setnchannels(AI_DIALOG_CHANNELS)
+        wf.setsampwidth(AI_DIALOG_SAMPLE_WIDTH)
+        wf.setframerate(AI_DIALOG_SAMPLE_RATE)
+        wf.writeframes(pcm_bytes)
+    return buffer.getvalue()
+
+
+def _current_time_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _handle_ai_dialog_task(device_no: str, dialog_id: str, pcm_bytes: bytes) -> None:
+    """Forward dialog audio to compute, push FastGPT reply as TTS, then callback backend."""
+    selected_node = None
+    try:
+        if not piper_tts_manager.is_available():
+            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "TTS service is unavailable"})
+            return
+
+        selected_node = node_manager.get_least_connection_node()
+        if selected_node is None:
+            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "no available compute node"})
+            return
+
+        knowledge_base_id = ""
+        if _backend_client is not None:
+            knowledge_base_id = await _backend_client.get_knowledge_base_id(device_no) or ""
+        if not knowledge_base_id:
+            logger.error(
+                f"AI dialog knowledge base id missing | deviceNo={device_no} | dialogId={dialog_id}"
+            )
+            await ws_device_manager.send_text(
+                device_no,
+                {
+                    "type": "dialog_error",
+                    "dialogId": dialog_id,
+                    "message": "knowledge base id not found",
+                },
+            )
+            return
+
+        wav_bytes = _pcm_to_wav(pcm_bytes)
+        event_time = _current_time_str()
+        target_url = f"http://{selected_node}{AI_DIALOG_INTERNAL_PATH}"
+        files = {"audio_file": (f"{dialog_id}_{device_no}.wav", wav_bytes, "audio/wav")}
+        data = {
+            "device_no": device_no,
+            "dialog_id": dialog_id,
+            "event_time": event_time,
+            "request_id": dialog_id,
+            "knowledge_base_id": knowledge_base_id,
+            "knowledgeBaseId": knowledge_base_id,
+        }
+
+        await node_manager.increment_connection(selected_node)
+        try:
+            client = await HttpClientSingleton.get_client()
+            response = await client.post(url=target_url, files=files, data=data, timeout=AI_DIALOG_REQUEST_TIMEOUT)
+        finally:
+            await node_manager.decrement_connection(selected_node)
+
+        if not (200 <= response.status_code < 300):
+            logger.error(f"AI dialog compute failed | deviceNo={device_no} | dialogId={dialog_id} | node={selected_node} | status={response.status_code} | body={response.text[:500]}")
+            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "AI dialog inference failed"})
+            return
+
+        result = response.json()
+        payload = result.get("data") or {}
+        reply_id = payload.get("id") or dialog_id
+        reply_content = (payload.get("content") or "").strip()
+        if not reply_content:
+            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "AI reply is empty"})
+            return
+
+        logger.info(f"AI dialog reply received | deviceNo={device_no} | dialogId={dialog_id} | replyId={reply_id} | contentLength={len(reply_content)}")
+        audio_stream = piper_tts_manager.synthesize_stream(reply_content)
+        push_success = await ws_device_manager.push_dialog_audio_stream(device_no=device_no, dialog_id=dialog_id, audio_stream=audio_stream)
+        if not push_success:
+            return
+
+        if _backend_client is not None:
+            await _backend_client.report_dialog_completion(device_no, _current_time_str())
+        logger.info(f"AI dialog pipeline completed | deviceNo={device_no} | dialogId={dialog_id} | replyId={reply_id}")
+
+    except Exception as e:
+        logger.error(f"AI dialog pipeline exception | deviceNo={device_no} | dialogId={dialog_id} | node={selected_node or 'unknown'} | error={type(e).__name__}: {str(e)[:300]}")
+        await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "AI dialog service error"})
 
 
 # ==================== POST接口：后端调用播报 ====================

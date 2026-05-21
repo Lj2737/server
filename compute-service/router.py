@@ -20,6 +20,7 @@ from config import (
     ConfigType,
 )
 from models import asr_model, llm_model, get_model_status
+from fastgpt_client import fastgpt_client
 from cache import IdempotencyCache
 from keyword_config import KeywordConfigManager
 from audio_utils import validate_wav_audio, clip_abnormal_audio, ensure_mono_audio
@@ -119,6 +120,123 @@ async def health_check():
 
 
 # ==================== 语音行为识别推理接口 ====================
+
+@router.post("/badge/v1/internal/algorithm/dialog/ai-chat")
+async def ai_dialog_chat(
+    audio_file: UploadFile = File(..., description="AI dialog WAV audio, 16kHz/16bit/mono"),
+    device_no: str = Form(..., description="Device number"),
+    dialog_id: str = Form(..., description="Dialog ID"),
+    event_time: str = Form(..., description="Dialog time, yyyy-MM-dd HH:mm:ss"),
+    request_id: str = Form(..., description="Request ID, usually same as dialog_id"),
+    knowledge_base_id: str = Form("", description="FastGPT knowledge base ID"),
+    knowledge_base_id_camel: str = Form("", alias="knowledgeBaseId", description="FastGPT knowledge base ID"),
+):
+    """
+    AI对话推理接口：音频 -> ASR文本 -> FastGPT工作流回复。
+
+    返回字段中data.id来自FastGPT响应id，data.content来自FastGPT响应choices[0].message.content。
+    """
+    start_time = time.time()
+    audio_bytes = await audio_file.read()
+
+    is_valid, msg = validate_wav_audio(audio_bytes)
+    if not is_valid:
+        raise ComputeException(
+            code=ErrorCode.BAD_REQUEST,
+            msg=f"{ErrorMsg.AUDIO_FORMAT_INVALID}: {msg}",
+            request_id=request_id,
+        )
+
+    audio_bytes = ensure_mono_audio(audio_bytes)
+
+    acquired = await _try_acquire_semaphore(request_id)
+    if not acquired:
+        raise ComputeException(
+            code=ErrorCode.TOO_MANY_REQUESTS,
+            msg=ErrorMsg.TOO_MANY_REQUESTS,
+            request_id=request_id,
+        )
+
+    _increment_connections()
+    try:
+        try:
+            logger.info(
+                f"AI dialog ASR start | request_id={request_id} | "
+                f"dialog_id={dialog_id} | device_no={device_no} | event_time={event_time}"
+            )
+            try:
+                asr_text = await asr_model.inference(audio_bytes)
+            except RuntimeError as e:
+                raise ComputeException(
+                    code=ErrorCode.ASR_INFERENCE_FAILED,
+                    msg=f"{ErrorMsg.ASR_INFERENCE_FAILED}: {str(e)}",
+                    request_id=request_id,
+                )
+
+            if not asr_text.strip():
+                raise ComputeException(
+                    code=ErrorCode.ASR_INFERENCE_FAILED,
+                    msg=ErrorMsg.ASR_OUTPUT_EMPTY,
+                    request_id=request_id,
+                )
+
+            chat_time = event_time.replace("-", "").replace(":", "").replace(" ", "")
+            chat_id = f"{device_no}_{chat_time}" if chat_time else (dialog_id or device_no)
+            resolved_knowledge_base_id = (
+                knowledge_base_id.strip() or knowledge_base_id_camel.strip()
+            )
+            if not resolved_knowledge_base_id:
+                raise ComputeException(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg="FastGPT knowledgeBaseId is required",
+                    request_id=request_id,
+                )
+            try:
+                fastgpt_result = await fastgpt_client.chat(
+                    chat_id=chat_id,
+                    user_content=asr_text,
+                    knowledge_base_id=resolved_knowledge_base_id,
+                )
+            except Exception as e:
+                logger.error(
+                    f"FastGPT chat failed | request_id={request_id} | "
+                    f"dialog_id={dialog_id} | error={str(e)[:300]}"
+                )
+                raise ComputeException(
+                    code=ErrorCode.LLM_INFERENCE_FAILED,
+                    msg=f"FastGPT对话失败: {str(e)}",
+                    request_id=request_id,
+                )
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                f"AI dialog completed | request_id={request_id} | "
+                f"dialog_id={dialog_id} | fastgptId={fastgpt_result['id']} | "
+                f"asrLength={len(asr_text)} | replyLength={len(fastgpt_result['content'])} | "
+                f"elapsed={elapsed_ms}ms"
+            )
+            return {
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "id": fastgpt_result["id"],
+                    "content": fastgpt_result["content"],
+                    "asrText": asr_text,
+                },
+                "request_id": request_id,
+            }
+        except ComputeException:
+            raise
+        except Exception as e:
+            logger.exception(f"AI dialog failed | request_id={request_id} | error={e}")
+            raise ComputeException(
+                code=ErrorCode.INTERNAL_ERROR,
+                msg=ErrorMsg.INTERNAL_ERROR,
+                request_id=request_id,
+            )
+    finally:
+        _semaphore.release()
+        _decrement_connections()
 
 @router.post(
     "/badge/v1/internal/algorithm/inference/behavior-recognition",

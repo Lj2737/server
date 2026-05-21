@@ -107,6 +107,17 @@ LLM_REASONING_EFFORT: str = _env_str("LLM_REASONING_EFFORT", "")
 LLM_THINKING_ENABLED: bool = _env_bool("LLM_THINKING_ENABLED", False)
 
 
+# ==================== FastGPT API配置 ====================
+FASTGPT_API_URL: str = _env_str(
+    "FASTGPT_API_URL",
+    "https://cloud.fastgpt.cn/api/v1/chat/completions",
+)
+FASTGPT_API_KEY: str = _env_str("FASTGPT_API_KEY")
+FASTGPT_API_TIMEOUT: float = _env_float("FASTGPT_API_TIMEOUT", 60.0)
+FASTGPT_DATASET_VARIABLE_NAME: str = _env_str("FASTGPT_DATASET_VARIABLE_NAME", "datasetid")
+FASTGPT_DATASET_VARIABLE_KEY: str = _env_str("FASTGPT_DATASET_VARIABLE_KEY", "id1")
+
+
 # ==================== 行为识别LLM推理参数 ====================
 # 温度（低随机性，保证输出稳定）
 BEHAVIOR_LLM_TEMPERATURE: float = _env_float("BEHAVIOR_LLM_TEMPERATURE", 0.1)

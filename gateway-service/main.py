@@ -64,6 +64,7 @@ from exception import (
 )
 # 值班播报模块（TTS API + WebSocket推送）
 from duty_broadcast_router import (
+    initialize_ai_dialog,
     ws_router,
     piper_tts_manager,
     ws_device_manager,
@@ -125,6 +126,8 @@ async def lifespan(app: FastAPI):
         f"回调路径={BEHAVIOR_CALLBACK_PATH}"
     )
 
+    initialize_ai_dialog(backend_client=backend_client)
+    logger.info("AI dialog WebSocket pipeline initialized")
     # 初始化AI对话完成回调（注入BackendClient，用于回调后端dialog-completions）
     initialize_dialog_callback(backend_client=backend_client)
     logger.info("AI对话完成回调功能已初始化")

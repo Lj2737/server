@@ -1,21 +1,10 @@
-"""
-智能胸牌服务管理系统 - 主网关节点配置文件
-所有配置项集中管理，禁止硬编码
-适应部署架构：1台主树莓派（网关） + 4台从树莓派（算力）
+"""Gateway service configuration.
 
-v3.2更新：
-- 硬件接收路径统一为 /badge/v1/internal/hardware 前缀（硬件→算法，非算法→后端）
-- 新增算力节点→主网关内部接口路径（dialog-completed、knowledge-base）
-- 新增知识库缓存配置
-- 新增算法查询设备知识库ID接口路径
-- 录音上传接口已废弃（v3.1合并到voice-behaviors，配置项已移除）
-
-v3.1更新：
-- 接口路径统一为 /badge/v1/ 前缀（算法→后端路径）
-- 异常行为片段录音合并到 voice-behaviors 接口（multipart/form-data）
-- 新增 AI对话完成回调接口（dialog-completions）
+All local environment variables are loaded from gateway-service/.env by
+env_loader.load_env_file().
 """
-from typing import List, Dict
+
+from typing import Dict, List
 import os
 
 from env_loader import load_env_file
@@ -42,288 +31,257 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# ==================== 服务配置 ====================
-# 网关服务监听端口（对外唯一暴露端口，仅对接后端）
-GATEWAY_PORT: int = 8090
-# 网关服务监听地址
-GATEWAY_HOST: str = "0.0.0.0"
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-# ==================== 算力节点配置 ====================
-# 算力节点列表（固定4台，对内端口8091）
-# 【本地测试时改为127.0.0.1:8091，生产部署改回树莓派IP】
+# Gateway server
+GATEWAY_PORT: int = _env_int("GATEWAY_PORT", 8090)
+GATEWAY_HOST: str = _env_str("GATEWAY_HOST", "0.0.0.0")
+
+
+# Compute nodes
 COMPUTE_NODES: List[str] = [
-    "127.0.0.1:8091",
-    # "192.168.1.101:8091",  # 树莓派算力节点1
-    # "192.168.1.102:8091",  # 树莓派算力节点2
-    # "192.168.1.103:8091",  # 树莓派算力节点3
-    # "192.168.1.104:8091",  # 树莓派算力节点4
-    
+    node.strip()
+    for node in _env_str("COMPUTE_NODES", "127.0.0.1:8091").split(",")
+    if node.strip()
 ]
-
-# 单台算力节点最大并发数
-MAX_CONCURRENT_PER_NODE: int = 5
-# 全局最大并发数（4台 × 5路 = 20路）
-MAX_CONCURRENT_TOTAL: int = 20
+MAX_CONCURRENT_PER_NODE: int = _env_int("MAX_CONCURRENT_PER_NODE", 5)
+MAX_CONCURRENT_TOTAL: int = _env_int("MAX_CONCURRENT_TOTAL", 20)
 
 
-# ==================== 健康检查配置 ====================
-# 健康检查间隔（秒）
-HEALTH_CHECK_INTERVAL: int = 5
-# 连续失败次数阈值，达到后标记节点不可用并摘除
-HEALTH_CHECK_FAIL_THRESHOLD: int = 2
-# 连续成功次数阈值，达到后重新加入可用节点池
-HEALTH_CHECK_RECOVER_THRESHOLD: int = 3
-# 健康检查请求超时（秒）
-HEALTH_CHECK_TIMEOUT: float = 3.0
+# Health checks
+HEALTH_CHECK_INTERVAL: int = _env_int("HEALTH_CHECK_INTERVAL", 5)
+HEALTH_CHECK_FAIL_THRESHOLD: int = _env_int("HEALTH_CHECK_FAIL_THRESHOLD", 2)
+HEALTH_CHECK_RECOVER_THRESHOLD: int = _env_int("HEALTH_CHECK_RECOVER_THRESHOLD", 3)
+HEALTH_CHECK_TIMEOUT: float = _env_float("HEALTH_CHECK_TIMEOUT", 3.0)
 
 
-# ==================== 请求转发配置 ====================
-# 单请求转发超时时间（秒）
-REQUEST_TIMEOUT: float = 10.0
-# httpx连接池总大小
-HTTP_CLIENT_MAX_CONNECTIONS: int = 20
-# httpx单主机最大保持活跃连接数
-HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS: int = 10
+# HTTP client
+REQUEST_TIMEOUT: float = _env_float("REQUEST_TIMEOUT", 10.0)
+HTTP_CLIENT_MAX_CONNECTIONS: int = _env_int("HTTP_CLIENT_MAX_CONNECTIONS", 20)
+HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS: int = _env_int(
+    "HTTP_CLIENT_MAX_KEEPALIVE_CONNECTIONS",
+    10,
+)
 
 
-# ==================== 路由映射配置 ====================
-# 外部路径 → 算力节点内部路径映射
-# 对外接口统一前缀 /badge/v1/gateway/，内部统一前缀 /badge/v1/internal/algorithm/
+# Gateway-to-compute route mapping
 ROUTE_MAPPING: Dict[str, str] = {
     "/badge/v1/gateway/behavior-recognition": "/badge/v1/internal/algorithm/inference/behavior-recognition",
 }
 
 
-# ==================== 日志配置 ====================
-# 日志文件存放目录
-LOG_DIR: str = "logs"
-# 日志文件名格式（按天命名）
-LOG_FILE_FORMAT: str = "gateway_{time:YYYY-MM-DD}.log"
-# 日志保留天数（过期自动清理）
-LOG_RETENTION_DAYS: str = "7 days"
-# 日志轮转时间（每天0点分割）
-LOG_ROTATION: str = "00:00"
-# 日志级别
-LOG_LEVEL: str = "INFO"
+# Logging
+LOG_DIR: str = _env_str("LOG_DIR", "logs")
+LOG_FILE_FORMAT: str = _env_str("LOG_FILE_FORMAT", "gateway_{time:YYYY-MM-DD}.log")
+LOG_RETENTION_DAYS: str = _env_str("LOG_RETENTION_DAYS", "7 days")
+LOG_ROTATION: str = _env_str("LOG_ROTATION", "00:00")
+LOG_LEVEL: str = _env_str("LOG_LEVEL", "INFO")
 
 
-# ==================== 业务枚举值（强制使用，禁止自定义） ====================
-
+# Common enums
 class BehaviorType:
-    """行为类型枚举"""
-    STANDARD = "STANDARD"      # 标准行为
-    ABNORMAL = "ABNORMAL"      # 异常行为
-    CUSTOMER = "CUSTOMER"      # 顾客负面行为
+    STANDARD = "STANDARD"
+    ABNORMAL = "ABNORMAL"
+    CUSTOMER = "CUSTOMER"
 
 
 class DimensionType:
-    """维度类型枚举"""
-    STRENGTH = "STRENGTH"      # 优势维度
-    WEAKNESS = "WEAKNESS"      # 薄弱维度
+    STRENGTH = "STRENGTH"
+    WEAKNESS = "WEAKNESS"
 
 
 class ConfigType:
-    """配置类型枚举"""
-    KEYWORD = "KEYWORD"        # 词库配置
+    KEYWORD = "KEYWORD"
 
 
 class AlarmStatus:
-    """告警状态枚举"""
-    ACTIVE = "ACTIVE"          # 告警生效
-    RECOVERED = "RECOVERED"    # 告警恢复
+    ACTIVE = "ACTIVE"
+    RECOVERED = "RECOVERED"
 
 
 class EventType:
-    HEARTBEAT = "HEARTBEAT"   # 心跳状态
-    ALARM = "ALARM"           # 硬件告警
+    HEARTBEAT = "HEARTBEAT"
+    ALARM = "ALARM"
 
 
-# ==================== 时间格式 ====================
-# 日期时间格式：yyyy-MM-dd HH:mm:ss
+class BusinessType:
+    BEHAVIOR = "BEHAVIOR"
+    RECORDING = "RECORDING"
+
+
+# Time formats
 DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
-# 日期格式：yyyy-MM-dd
 DATE_FORMAT: str = "%Y-%m-%d"
 
 
-# ==================== 幂等与重试配置 ====================
-# 算法回调后端使用的幂等键Header名
-IDEMPOTENT_KEY_CALLBACK = "eventId"
-# 后端调用算法使用的幂等键Header名
-IDEMPOTENT_KEY_REQUEST = "requestId"
-# 请求ID Header名（网关内部使用）
-REQUEST_ID_HEADER = "X-Request-ID"
+# Idempotency and request tracing
+IDEMPOTENT_KEY_CALLBACK: str = "eventId"
+IDEMPOTENT_KEY_REQUEST: str = "requestId"
+REQUEST_ID_HEADER: str = "X-Request-ID"
 
 
-# ==================== 后端接口通用客户端配置 ====================
-# 后端服务基础地址（算法侧回调后端的地址，部署时按实际环境修改）
-# 【本地测试时改为127.0.0.1:8080，生产部署改回树莓派IP】
-BACKEND_BASE_URL: str = "http://127.0.0.1:8080"
-# 后端接口鉴权Token（Header方式，部署时按后端分配修改）
-BACKEND_AUTH_TOKEN: str = "your-internal-token-here"
-# 鉴权Token的Header名
-BACKEND_AUTH_HEADER: str = "Authorization"
-# 后端请求默认超时时间（秒）
-BACKEND_REQUEST_TIMEOUT: float = 10.0
-# 后端请求最大重试次数
-BACKEND_MAX_RETRIES: int = 3
-# 后端请求重试间隔（秒），指数退避基数：1s, 3s, 5s
+# Backend service
+BACKEND_BASE_URL: str = _env_str("BACKEND_BASE_URL", "http://127.0.0.1:8080")
+BACKEND_AUTH_TOKEN: str = _env_str("BACKEND_AUTH_TOKEN", "your-internal-token-here")
+BACKEND_AUTH_HEADER: str = _env_str("BACKEND_AUTH_HEADER", "Authorization")
+BACKEND_REQUEST_TIMEOUT: float = _env_float("BACKEND_REQUEST_TIMEOUT", 10.0)
+BACKEND_MAX_RETRIES: int = _env_int("BACKEND_MAX_RETRIES", 3)
 BACKEND_RETRY_DELAYS: List[float] = [1.0, 3.0, 5.0]
-# 后端httpx连接池总大小
-BACKEND_HTTP_MAX_CONNECTIONS: int = 10
-# 后端httpx单主机最大保持活跃连接数
-BACKEND_HTTP_MAX_KEEPALIVE_CONNECTIONS: int = 5
+BACKEND_HTTP_MAX_CONNECTIONS: int = _env_int("BACKEND_HTTP_MAX_CONNECTIONS", 10)
+BACKEND_HTTP_MAX_KEEPALIVE_CONNECTIONS: int = _env_int(
+    "BACKEND_HTTP_MAX_KEEPALIVE_CONNECTIONS",
+    5,
+)
 
 
-# ==================== 幂等ID生成器配置 ====================
-# eventId格式前缀：AI_业务类型_
-# 业务类型枚举
-class BusinessType:
-    """幂等ID业务类型枚举"""
-    BEHAVIOR = "BEHAVIOR"      # 行为识别事件
-    RECORDING = "RECORDING"    # 录音上传事件（v3.1已废弃，合并到voice-behaviors）
+# Temporary audio clips
+AUDIO_TEMP_DIR: str = _env_str("AUDIO_TEMP_DIR", "temp/audio_clips")
+AUDIO_TEMP_FILE_TTL: int = _env_int("AUDIO_TEMP_FILE_TTL", 3600)
+AUDIO_TEMP_CLEANUP_INTERVAL: int = _env_int("AUDIO_TEMP_CLEANUP_INTERVAL", 3600)
 
 
-# ==================== 异常音频临时存储配置 ====================
-# 临时文件存放目录
-AUDIO_TEMP_DIR: str = "temp/audio_clips"
-# 临时文件过期时间（秒），超过此时间的文件将被清理
-AUDIO_TEMP_FILE_TTL: int = 3600      # 1小时
-# 定时清理间隔（秒）
-AUDIO_TEMP_CLEANUP_INTERVAL: int = 3600  # 每小时清理一次
+# Backend callback paths
+BEHAVIOR_CALLBACK_PATH: str = _env_str(
+    "BEHAVIOR_CALLBACK_PATH",
+    "/badge/v1/internal/ai/voice-behaviors",
+)
+DIALOG_COMPLETION_CALLBACK_PATH: str = _env_str(
+    "DIALOG_COMPLETION_CALLBACK_PATH",
+    "/badge/v1/internal/ai/dialog-completions",
+)
+RECORDING_UPLOAD_PATH: str = _env_str(
+    "RECORDING_UPLOAD_PATH",
+    "/badge/v1/internal/ai/recordings",
+)
+RECORDING_UPLOAD_TIMEOUT: float = _env_float("RECORDING_UPLOAD_TIMEOUT", 30.0)
 
 
-# ==================== 算法→后端回调接口路径 ====================
-# 语音行为识别结果回调后端接口路径（POST，Content-Type: multipart/form-data）
-# v3.1：异常行为片段录音合并到此接口，ABNORMAL必须上传file字段
-BEHAVIOR_CALLBACK_PATH: str = "/badge/v1/internal/ai/voice-behaviors"
-
-# AI对话完成回调后端接口路径（POST，Content-Type: application/json）
-# v3.1新增接口
-DIALOG_COMPLETION_CALLBACK_PATH: str = "/badge/v1/internal/ai/dialog-completions"
-
-# 录音上传后端接口（v3.1已废弃，异常录音合并到voice-behaviors，v3.2移除配置项）
-# 如需录音上传功能，请使用 BEHAVIOR_CALLBACK_PATH（/badge/v1/internal/ai/voice-behaviors）
-
-
-# ==================== 硬件状态透传后端配置 ====================
-# 算法→后端透传接口路径：POST /badge/v1/internal/ai/device-events
-DEVICE_EVENT_FORWARD_PATH: str = "/badge/v1/internal/ai/device-events"
-# 透传最大重试次数（不含首次请求，最多重试2次）
-DEVICE_EVENT_FORWARD_MAX_RETRIES: int = 2
-# 透传重试间隔（秒），固定1秒
-DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = 1.0
+# Device event forwarding to backend
+DEVICE_EVENT_FORWARD_PATH: str = _env_str(
+    "DEVICE_EVENT_FORWARD_PATH",
+    "/badge/v1/internal/ai/device-events",
+)
+DEVICE_EVENT_FORWARD_MAX_RETRIES: int = _env_int("DEVICE_EVENT_FORWARD_MAX_RETRIES", 2)
+DEVICE_EVENT_FORWARD_RETRY_INTERVAL: float = _env_float(
+    "DEVICE_EVENT_FORWARD_RETRY_INTERVAL",
+    1.0,
+)
 
 
-# ==================== 算力节点→主网关内部接口路径 ====================
-# AI对话完成内部接口（算力节点调用主网关）
-DIALOG_COMPLETED_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/dialog-completed"
-# 知识库查询内部接口（算力节点调用主网关）
-KNOWLEDGE_BASE_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/knowledge-base"
-
-# ==================== 知识库缓存配置 ====================
-# 知识库ID缓存过期时间（秒），默认24小时
-KNOWLEDGE_BASE_CACHE_TTL: int = 86400  # 24小时
-# 知识库ID缓存清理间隔（秒）
-KNOWLEDGE_BASE_CACHE_CLEANUP_INTERVAL: int = 3600  # 1小时
-
-# ==================== 算法查询设备知识库ID接口路径 ====================
-# 算法查询设备知识库ID接口路径（算法→后端）
-KNOWLEDGE_BASE_QUERY_PATH: str = "/badge/v1/internal/ai/devices/knowledge-base"
-
-# ==================== 功能3：AI时段诊断总结配置 ====================
-# AI诊断请求转发到算力节点的内部路径
-DIAGNOSIS_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/inference/diagnosis-summary"
-# AI诊断请求超时时间（秒），LLM推理耗时较长，设置为60秒
-DIAGNOSIS_REQUEST_TIMEOUT: float = 60.0
+# Internal compute callbacks
+DIALOG_COMPLETED_INTERNAL_PATH: str = _env_str(
+    "DIALOG_COMPLETED_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/dialog-completed",
+)
+KNOWLEDGE_BASE_INTERNAL_PATH: str = _env_str(
+    "KNOWLEDGE_BASE_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/knowledge-base",
+)
 
 
-# ==================== 功能4：词库配置同步配置 ====================
-# 词库配置同步到算力节点的内部路径
-CONFIG_SYNC_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/config/sync"
-# 词库配置同步请求超时时间（秒）
-CONFIG_SYNC_REQUEST_TIMEOUT: float = 10.0
+# Knowledge base cache and query path
+KNOWLEDGE_BASE_CACHE_TTL: int = _env_int("KNOWLEDGE_BASE_CACHE_TTL", 86400)
+KNOWLEDGE_BASE_CACHE_CLEANUP_INTERVAL: int = _env_int(
+    "KNOWLEDGE_BASE_CACHE_CLEANUP_INTERVAL",
+    3600,
+)
+KNOWLEDGE_BASE_QUERY_PATH: str = _env_str(
+    "KNOWLEDGE_BASE_QUERY_PATH",
+    "/badge/v1/internal/ai/devices/knowledge-base",
+)
 
 
-# ==================== 功能5：值班播报文字转语音配置 ====================
-# TTS播报请求超时时间（秒）
-TTS_REQUEST_TIMEOUT: float = 30.0
-# TTS播报请求转发到算力节点的内部路径
-TTS_INTERNAL_PATH: str = "/badge/v1/internal/algorithm/tts/broadcast"
+# Diagnosis
+DIAGNOSIS_INTERNAL_PATH: str = _env_str(
+    "DIAGNOSIS_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/inference/diagnosis-summary",
+)
+DIAGNOSIS_REQUEST_TIMEOUT: float = _env_float("DIAGNOSIS_REQUEST_TIMEOUT", 60.0)
 
 
-# ==================== TTS API配置 ====================
-# OpenAI-compatible Speech接口地址，例如 https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech
-TTS_API_BASE_URL: str = _env_str("TTS_API_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech")
-# API Key必须通过环境变量或 gateway-service/.env 配置
+# AI dialog
+AI_DIALOG_INTERNAL_PATH: str = _env_str(
+    "AI_DIALOG_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/dialog/ai-chat",
+)
+AI_DIALOG_REQUEST_TIMEOUT: float = _env_float("AI_DIALOG_REQUEST_TIMEOUT", 90.0)
+AI_DIALOG_MAX_AUDIO_SECONDS: int = _env_int("AI_DIALOG_MAX_AUDIO_SECONDS", 60)
+AI_DIALOG_SAMPLE_RATE: int = _env_int("AI_DIALOG_SAMPLE_RATE", 16000)
+AI_DIALOG_SAMPLE_WIDTH: int = _env_int("AI_DIALOG_SAMPLE_WIDTH", 2)
+AI_DIALOG_CHANNELS: int = _env_int("AI_DIALOG_CHANNELS", 1)
+
+
+# Config sync
+CONFIG_SYNC_INTERNAL_PATH: str = _env_str(
+    "CONFIG_SYNC_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/config/sync",
+)
+CONFIG_SYNC_REQUEST_TIMEOUT: float = _env_float("CONFIG_SYNC_REQUEST_TIMEOUT", 10.0)
+
+
+# Compute TTS endpoint
+TTS_REQUEST_TIMEOUT: float = _env_float("TTS_REQUEST_TIMEOUT", 30.0)
+TTS_INTERNAL_PATH: str = _env_str(
+    "TTS_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/tts/broadcast",
+)
+
+
+# External TTS API
+TTS_API_BASE_URL: str = _env_str(
+    "TTS_API_BASE_URL",
+    "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+)
 TTS_API_KEY: str = _env_str("TTS_API_KEY")
-# 模型名
-TTS_MODEL_NAME: str = _env_str("TTS_MODEL_NAME", "qwen3.6-flash")
-# 音色/发音人，按供应商支持的值配置
+TTS_MODEL_NAME: str = _env_str("TTS_MODEL_NAME", "qwen3-tts-flash")
 TTS_VOICE: str = _env_str("TTS_VOICE", "Cherry")
-# 请求超时（秒）
+TTS_LANGUAGE_TYPE: str = _env_str("TTS_LANGUAGE_TYPE", "Chinese")
 TTS_API_TIMEOUT: float = _env_float("TTS_API_TIMEOUT", 60.0)
-# 期望API返回格式：pcm / wav / mp3 等。设备直推建议pcm或wav。
 TTS_RESPONSE_FORMAT: str = _env_str("TTS_RESPONSE_FORMAT", "wav")
-# 目标音频采样率（Hz），硬件直接播放要求16000Hz
 TTS_TARGET_SAMPLE_RATE: int = _env_int("TTS_TARGET_SAMPLE_RATE", 16000)
-# 目标采样位深（字节），16bit = 2字节
 TTS_TARGET_SAMPLE_WIDTH: int = _env_int("TTS_TARGET_SAMPLE_WIDTH", 2)
-# 目标声道数，单声道
 TTS_TARGET_CHANNELS: int = _env_int("TTS_TARGET_CHANNELS", 1)
-# WebSocket推送chunk大小
-TTS_PUSH_CHUNK_SIZE: int = _env_int("TTS_PUSH_CHUNK_SIZE", 4096)
+TTS_PUSH_CHUNK_SIZE: int = _env_int("TTS_PUSH_CHUNK_SIZE", 3200)
+TTS_REALTIME_PUSH: bool = _env_bool("TTS_REALTIME_PUSH", True)
+TTS_PUSH_SPEED: float = _env_float("TTS_PUSH_SPEED", 1.0)
 
 
-# ==================== WebSocket设备连接管理配置 ====================
-# 心跳发送间隔（秒），每30秒发一次ping
-WS_HEARTBEAT_INTERVAL: int = 30
-# 心跳失败阈值，连续3次未回复pong判定离线
-WS_HEARTBEAT_FAIL_THRESHOLD: int = 3
-# 单次ping等待pong超时时间（秒）
-WS_PING_TIMEOUT: float = 5.0
+# WebSocket
+WS_HEARTBEAT_INTERVAL: int = _env_int("WS_HEARTBEAT_INTERVAL", 30)
+WS_HEARTBEAT_FAIL_THRESHOLD: int = _env_int("WS_HEARTBEAT_FAIL_THRESHOLD", 3)
+WS_PING_TIMEOUT: float = _env_float("WS_PING_TIMEOUT", 5.0)
 
 
-# ==================== 值班播报业务限制配置 ====================
-# 设备编号最大长度
-BROADCAST_DEVICE_NO_MAX_LENGTH: int = 20
-# 播报内容最大字数
-BROADCAST_CONTENT_MAX_LENGTH: int = 200
+# Broadcast validation
+BROADCAST_DEVICE_NO_MAX_LENGTH: int = _env_int("BROADCAST_DEVICE_NO_MAX_LENGTH", 20)
+BROADCAST_CONTENT_MAX_LENGTH: int = _env_int("BROADCAST_CONTENT_MAX_LENGTH", 200)
 
 
-# ==================== 硬件状态上报配置 ====================
-# 硬件→算法网关统一前缀
-HARDWARE_API_PREFIX: str = "/badge/v1/internal/hardware"
-# 设备编号最大长度
-DEVICE_NO_MAX_LENGTH: int = 20
-# 设备编号正则：仅支持字母、数字、下划线
-DEVICE_NO_PATTERN: str = r"^[a-zA-Z0-9_]+$"
-# 电量百分比取值范围
-BATTERY_LEVEL_MIN: int = 0
-BATTERY_LEVEL_MAX: int = 100
-# 信号等级取值范围
-SIGNAL_LEVEL_MIN: int = 0
-SIGNAL_LEVEL_MAX: int = 5
-
-# ==================== 设备状态缓存配置 ====================
-# 设备状态缓存过期时间（秒）
-DEVICE_STATUS_CACHE_TTL: int = 600       # 10分钟
-# 缓存定时清理间隔（秒）
-DEVICE_STATUS_CLEANUP_INTERVAL: int = 60
+# Hardware API validation
+HARDWARE_API_PREFIX: str = _env_str("HARDWARE_API_PREFIX", "/badge/v1/internal/hardware")
+DEVICE_NO_MAX_LENGTH: int = _env_int("DEVICE_NO_MAX_LENGTH", 20)
+DEVICE_NO_PATTERN: str = _env_str("DEVICE_NO_PATTERN", r"^[a-zA-Z0-9_]+$")
+BATTERY_LEVEL_MIN: int = _env_int("BATTERY_LEVEL_MIN", 0)
+BATTERY_LEVEL_MAX: int = _env_int("BATTERY_LEVEL_MAX", 100)
+SIGNAL_LEVEL_MIN: int = _env_int("SIGNAL_LEVEL_MIN", 0)
+SIGNAL_LEVEL_MAX: int = _env_int("SIGNAL_LEVEL_MAX", 5)
 
 
-# ==================== 原始异常语音上传配置 ====================
-# 原始音频临时文件存放目录
-RAW_AUDIO_TEMP_DIR: str = "temp/raw_uploads"
-# 原始音频文件最大允许大小（字节），默认10MB
-RAW_AUDIO_MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
-# 临时文件过期时间（秒）
-RAW_AUDIO_TEMP_FILE_TTL: int = 3600       # 1小时
-# 定时清理间隔（秒）
-RAW_AUDIO_CLEANUP_INTERVAL: int = 3600
-# metadata JSON字段最大长度（字符数）
-RAW_AUDIO_METADATA_MAX_LENGTH: int = 4096
-# WAV音频文件头魔数（RIFF）
+# Device status cache
+DEVICE_STATUS_CACHE_TTL: int = _env_int("DEVICE_STATUS_CACHE_TTL", 600)
+DEVICE_STATUS_CLEANUP_INTERVAL: int = _env_int("DEVICE_STATUS_CLEANUP_INTERVAL", 60)
+
+
+# Raw audio uploads from hardware
+RAW_AUDIO_TEMP_DIR: str = _env_str("RAW_AUDIO_TEMP_DIR", "temp/raw_uploads")
+RAW_AUDIO_MAX_FILE_SIZE: int = _env_int("RAW_AUDIO_MAX_FILE_SIZE", 10 * 1024 * 1024)
+RAW_AUDIO_TEMP_FILE_TTL: int = _env_int("RAW_AUDIO_TEMP_FILE_TTL", 3600)
+RAW_AUDIO_CLEANUP_INTERVAL: int = _env_int("RAW_AUDIO_CLEANUP_INTERVAL", 3600)
+RAW_AUDIO_METADATA_MAX_LENGTH: int = _env_int("RAW_AUDIO_METADATA_MAX_LENGTH", 4096)
 WAV_HEADER_MAGIC: bytes = b"RIFF"
-# 算力节点行为识别转发超时时间（秒）
-RAW_AUDIO_FORWARD_TIMEOUT: float = 30.0
+RAW_AUDIO_FORWARD_TIMEOUT: float = _env_float("RAW_AUDIO_FORWARD_TIMEOUT", 30.0)
