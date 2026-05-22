@@ -163,20 +163,37 @@ class BehaviorCallback:
         config_item_id = self._first_non_empty(
             inference_data.get("configItemId"),
             inference_data.get("config_item_id"),
+            inference_data.get("configitemid"),
+            inference_data.get("configItemID"),
+            inference_data.get("config_itemID"),
         )
         keyword_content = self._first_non_empty(
             inference_data.get("keywordContent"),
             inference_data.get("keyword_content"),
+            inference_data.get("keywordcontent"),
+            inference_data.get("keywordContentl"),
+            inference_data.get("keyword_contentl"),
         )
+
+        if not config_item_id or not keyword_content:
+            # logger.warning(
+            #     f"behavior callback skipped; configItemId and keywordContent are required to callback backend | "
+            #     f"eventId={event_id} | deviceNo={device_no} | behaviorType={behavior_type} | "
+            #     f"configItemId={config_item_id} | keywordContent={keyword_content} | "
+            #     f"inferenceData={inference_data}"
+            # )
+            return
 
         metadata = {
             "eventTime": formatted_time,
             "deviceNo": device_no,
             "behaviorType": behavior_type,
             "summary": summary,
-            "configItemId": config_item_id,
-            "keywordContent": keyword_content,
         }
+        if config_item_id:
+            metadata["configItemId"] = config_item_id
+        if keyword_content:
+            metadata["keywordContent"] = keyword_content
         metadata_json = json.dumps(metadata, ensure_ascii=False)
 
         logger.info(

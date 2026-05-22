@@ -194,6 +194,25 @@ class KeywordConfigManager:
         """获取当前按sop/forbidden/customer分组的词库配置"""
         return self._keyword_groups
 
+    def find_keyword_match(self, group_key: str, text: str) -> Optional[Dict[str, str]]:
+        source_text = (text or "").strip()
+        if not source_text:
+            return None
+
+        normalized_source = source_text.lower()
+        for config_item in self._keyword_groups.get(group_key, []):
+            config_item_id = str(config_item.get("configItemId", "")).strip()
+            if not config_item_id:
+                continue
+            for keyword in config_item.get("keywords", []) or []:
+                content = str(keyword.get("content", "")).strip()
+                if content and content.lower() in normalized_source:
+                    return {
+                        "config_item_id": config_item_id,
+                        "keyword_content": content,
+                    }
+        return None
+
     @staticmethod
     def _normalize_config_data(config_data: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
         """归一化配置数据，仅保留文档约定的三类顶层字段。"""

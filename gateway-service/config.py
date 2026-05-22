@@ -127,7 +127,7 @@ REQUEST_ID_HEADER: str = "X-Request-ID"
 
 # Backend service
 BACKEND_BASE_URL: str = _env_str("BACKEND_BASE_URL", "http://127.0.0.1:8080")
-BACKEND_AUTH_TOKEN: str = _env_str("BACKEND_AUTH_TOKEN", "your-internal-token-here")
+BACKEND_AUTH_TOKEN: str = _env_str("BACKEND_AUTH_TOKEN", "")
 BACKEND_AUTH_HEADER: str = _env_str("BACKEND_AUTH_HEADER", "Authorization")
 BACKEND_REQUEST_TIMEOUT: float = _env_float("BACKEND_REQUEST_TIMEOUT", 10.0)
 BACKEND_MAX_RETRIES: int = _env_int("BACKEND_MAX_RETRIES", 3)

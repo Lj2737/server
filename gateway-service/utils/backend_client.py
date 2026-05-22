@@ -215,7 +215,7 @@ class BackendClient:
     async def post_multipart(
         self,
         path: str,
-        files: Dict[str, tuple],
+        files: Optional[Dict[str, tuple]],
         data: Optional[Dict[str, str]] = None,
         idempotency_key: Optional[str] = None,
         extra_headers: Optional[Dict[str, str]] = None,
@@ -236,6 +236,13 @@ class BackendClient:
         Returns:
             后端响应的JSON数据
         """
+        if not files and data:
+            files = {
+                field_name: (None, "" if field_value is None else str(field_value))
+                for field_name, field_value in data.items()
+            }
+            data = None
+
         return await self._request(
             method="POST",
             path=path,

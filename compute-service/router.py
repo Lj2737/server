@@ -361,6 +361,49 @@ async def behavior_recognition(
                 )
                 behavior_type = BehaviorType.STANDARD
 
+            config_item_id = str(
+                llm_result.get(
+                    "config_item_id",
+                    llm_result.get(
+                        "configItemId",
+                        llm_result.get("configitemid", llm_result.get("configItemID", "")),
+                    ),
+                )
+            ).strip()
+            keyword_content = str(
+                llm_result.get(
+                    "keyword_content",
+                    llm_result.get(
+                        "keywordContent",
+                        llm_result.get("keywordcontent", llm_result.get("keywordContentl", "")),
+                    ),
+                )
+            ).strip()
+            is_abnormal = llm_result.get("is_abnormal", behavior_type == BehaviorType.ABNORMAL)
+
+            if behavior_type == BehaviorType.ABNORMAL and (
+                not config_item_id or not keyword_content
+            ):
+                keyword_match = keyword_config_manager.find_keyword_match("forbidden", asr_text)
+                if keyword_match:
+                    config_item_id = keyword_match["config_item_id"]
+                    keyword_content = keyword_match["keyword_content"]
+                    logger.info(
+                        f"ABNORMAL missing hit fields filled from forbidden keywords | "
+                        f"request_id={request_id} | config_item_id={config_item_id} | "
+                        f"keyword_content={keyword_content}"
+                    )
+
+            if behavior_type == BehaviorType.ABNORMAL and (
+                not config_item_id or not keyword_content
+            ):
+                logger.warning(
+                    f"ABNORMAL missing config_item_id/keyword_content, callback will omit empty fields | "
+                    f"request_id={request_id} | asr_text={asr_text[:100]}"
+                )
+            else:
+                is_abnormal = behavior_type == BehaviorType.ABNORMAL
+
             # ========== ⑥ 异常音频裁剪 ==========
             abnormal_audio_clip = None
             if behavior_type == BehaviorType.ABNORMAL:
@@ -374,9 +417,9 @@ async def behavior_recognition(
             result_data = {
                 "behavior_type": behavior_type,
                 "summary": llm_result.get("summary", ""),
-                "config_item_id": llm_result.get("config_item_id", llm_result.get("configItemId", "")),
-                "keyword_content": llm_result.get("keyword_content", llm_result.get("keywordContent", "")),
-                "is_abnormal": llm_result.get("is_abnormal", behavior_type == BehaviorType.ABNORMAL),
+                "config_item_id": config_item_id,
+                "keyword_content": keyword_content,
+                "is_abnormal": is_abnormal,
             }
             # 仅ABNORMAL时返回异常音频片段
             if behavior_type == BehaviorType.ABNORMAL and abnormal_audio_clip:
