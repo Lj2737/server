@@ -102,6 +102,10 @@ ws_device_manager = WebSocketDeviceManager()
 node_manager = NodeManager()
 _backend_client: Optional[BackendClient] = None
 _dialog_sessions: Dict[str, Dict[str, Any]] = {}
+_dialog_tasks: Dict[str, asyncio.Task] = {}
+_dialog_task_dialog_ids: Dict[str, str] = {}
+_dialog_versions: Dict[str, int] = {}
+_DIALOG_INTERRUPT_WAIT_SECONDS = 1.0
 
 
 def initialize_ai_dialog(backend_client: BackendClient) -> None:
@@ -109,6 +113,91 @@ def initialize_ai_dialog(backend_client: BackendClient) -> None:
     global _backend_client
     _backend_client = backend_client
     logger.info("AI dialog WebSocket pipeline initialized")
+
+
+def _next_dialog_version(device_no: str) -> int:
+    version = _dialog_versions.get(device_no, 0) + 1
+    _dialog_versions[device_no] = version
+    return version
+
+
+def _is_current_dialog(device_no: str, dialog_id: str, version: int) -> bool:
+    current_task = asyncio.current_task()
+    tracked_task = _dialog_tasks.get(device_no)
+    return (
+        _dialog_versions.get(device_no) == version
+        and _dialog_task_dialog_ids.get(device_no) == dialog_id
+        and (current_task is None or tracked_task is current_task)
+    )
+
+
+def _track_dialog_task(device_no: str, dialog_id: str, task: asyncio.Task) -> None:
+    _dialog_tasks[device_no] = task
+    _dialog_task_dialog_ids[device_no] = dialog_id
+
+    def _cleanup(done_task: asyncio.Task) -> None:
+        if _dialog_tasks.get(device_no) is done_task:
+            _dialog_tasks.pop(device_no, None)
+            _dialog_task_dialog_ids.pop(device_no, None)
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(
+                f"AI dialog task ended with unhandled exception | "
+                f"deviceNo={device_no} | dialogId={dialog_id} | "
+                f"error={type(exc).__name__}: {str(exc)[:300]}"
+            )
+
+    task.add_done_callback(_cleanup)
+
+
+async def _cancel_active_dialog(device_no: str, reason: str) -> Optional[str]:
+    session = _dialog_sessions.pop(device_no, None)
+    session_dialog_id = str(session.get("dialog_id", "")) if session else ""
+
+    task = _dialog_tasks.pop(device_no, None)
+    task_dialog_id = _dialog_task_dialog_ids.pop(device_no, "")
+    interrupted_dialog_id = task_dialog_id or session_dialog_id or None
+
+    if session_dialog_id:
+        logger.info(
+            f"AI dialog recording state cleared | deviceNo={device_no} | "
+            f"dialogId={session_dialog_id} | reason={reason}"
+        )
+
+    if task is None:
+        if interrupted_dialog_id:
+            _next_dialog_version(device_no)
+        return interrupted_dialog_id
+
+    _next_dialog_version(device_no)
+    if task.done():
+        return interrupted_dialog_id
+
+    logger.info(
+        f"AI dialog interruption requested | deviceNo={device_no} | "
+        f"dialogId={task_dialog_id or 'unknown'} | reason={reason}"
+    )
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=_DIALOG_INTERRUPT_WAIT_SECONDS)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"AI dialog task cancellation timed out | deviceNo={device_no} | "
+            f"dialogId={task_dialog_id or 'unknown'} | "
+            f"timeout={_DIALOG_INTERRUPT_WAIT_SECONDS}s"
+        )
+    except Exception as exc:
+        logger.warning(
+            f"AI dialog task finished during interruption | deviceNo={device_no} | "
+            f"dialogId={task_dialog_id or 'unknown'} | "
+            f"error={type(exc).__name__}: {str(exc)[:200]}"
+        )
+    return interrupted_dialog_id
 
 
 # ==================== WebSocket端点：胸牌设备连接 ====================
@@ -203,6 +292,7 @@ async def device_websocket(websocket: WebSocket, device_no: str):
 
     finally:
         # 步骤4：注销设备
+        await _cancel_active_dialog(device_no, reason="websocket_disconnect")
         await ws_device_manager.unregister_device(device_no)
 
 
@@ -227,14 +317,20 @@ async def _handle_device_message(device_no: str, websocket: WebSocket, text: str
                 await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": False, "message": "deviceNo does not match websocket path"})
                 return
 
+            interrupted_dialog_id = await _cancel_active_dialog(device_no, reason="new_dialog_start")
+            session_version = _next_dialog_version(device_no)
             _dialog_sessions[device_no] = {
                 "dialog_id": dialog_id,
+                "version": session_version,
                 "chunks": [],
                 "total_bytes": 0,
                 "started_at": time.time(),
             }
             await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": True})
-            logger.info(f"AI dialog started | deviceNo={device_no} | dialogId={dialog_id}")
+            logger.info(
+                f"AI dialog started | deviceNo={device_no} | dialogId={dialog_id} | "
+                f"version={session_version} | interruptedDialogId={interrupted_dialog_id or ''}"
+            )
             return
 
         if msg_type == "dialog_end":
@@ -252,10 +348,16 @@ async def _handle_device_message(device_no: str, websocket: WebSocket, text: str
                 await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": session["dialog_id"], "message": "dialog audio is empty"})
                 return
 
-            asyncio.create_task(
-                _handle_ai_dialog_task(device_no=device_no, dialog_id=session["dialog_id"], pcm_bytes=pcm_bytes),
+            task = asyncio.create_task(
+                _handle_ai_dialog_task(
+                    device_no=device_no,
+                    dialog_id=session["dialog_id"],
+                    version=int(session.get("version", 0)),
+                    pcm_bytes=pcm_bytes,
+                ),
                 name=f"ai-dialog-{device_no}-{session['dialog_id']}",
             )
+            _track_dialog_task(device_no, session["dialog_id"], task)
             logger.info(f"AI dialog audio accepted | deviceNo={device_no} | dialogId={session['dialog_id']} | bytes={len(pcm_bytes)}")
             return
 
@@ -283,34 +385,51 @@ def _current_time_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-async def _handle_ai_dialog_task(device_no: str, dialog_id: str, pcm_bytes: bytes) -> None:
+async def _send_current_dialog_error(
+    device_no: str,
+    dialog_id: str,
+    version: int,
+    message: str,
+) -> bool:
+    if not _is_current_dialog(device_no, dialog_id, version):
+        logger.info(
+            f"AI dialog stale error suppressed | deviceNo={device_no} | "
+            f"dialogId={dialog_id} | version={version} | message={message}"
+        )
+        return False
+    return await ws_device_manager.send_text(
+        device_no,
+        {"type": "dialog_error", "dialogId": dialog_id, "message": message},
+    )
+
+
+async def _handle_ai_dialog_task(device_no: str, dialog_id: str, version: int, pcm_bytes: bytes) -> None:
     """Forward dialog audio to compute, push FastGPT reply as TTS, then callback backend."""
     selected_node = None
     try:
         if not piper_tts_manager.is_available():
-            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "TTS service is unavailable"})
+            await _send_current_dialog_error(device_no, dialog_id, version, "TTS service is unavailable")
             return
 
         selected_node = node_manager.get_least_connection_node()
         if selected_node is None:
-            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "no available compute node"})
+            await _send_current_dialog_error(device_no, dialog_id, version, "no available compute node")
             return
 
         knowledge_base_id = ""
         if _backend_client is not None:
             knowledge_base_id = await _backend_client.get_knowledge_base_id(device_no) or ""
+        if not _is_current_dialog(device_no, dialog_id, version):
+            logger.info(
+                f"AI dialog task became stale after knowledge lookup | "
+                f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
+            )
+            return
         if not knowledge_base_id:
             logger.error(
                 f"AI dialog knowledge base id missing | deviceNo={device_no} | dialogId={dialog_id}"
             )
-            await ws_device_manager.send_text(
-                device_no,
-                {
-                    "type": "dialog_error",
-                    "dialogId": dialog_id,
-                    "message": "knowledge base id not found",
-                },
-            )
+            await _send_current_dialog_error(device_no, dialog_id, version, "knowledge base id not found")
             return
 
         wav_bytes = _pcm_to_wav(pcm_bytes)
@@ -333,9 +452,16 @@ async def _handle_ai_dialog_task(device_no: str, dialog_id: str, pcm_bytes: byte
         finally:
             await node_manager.decrement_connection(selected_node)
 
+        if not _is_current_dialog(device_no, dialog_id, version):
+            logger.info(
+                f"AI dialog task became stale after compute response | "
+                f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
+            )
+            return
+
         if not (200 <= response.status_code < 300):
             logger.error(f"AI dialog compute failed | deviceNo={device_no} | dialogId={dialog_id} | node={selected_node} | status={response.status_code} | body={response.text[:500]}")
-            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "AI dialog inference failed"})
+            await _send_current_dialog_error(device_no, dialog_id, version, "AI dialog inference failed")
             return
 
         result = response.json()
@@ -343,7 +469,14 @@ async def _handle_ai_dialog_task(device_no: str, dialog_id: str, pcm_bytes: byte
         reply_id = payload.get("id") or dialog_id
         reply_content = (payload.get("content") or "").strip()
         if not reply_content:
-            await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "AI reply is empty"})
+            await _send_current_dialog_error(device_no, dialog_id, version, "AI reply is empty")
+            return
+
+        if not _is_current_dialog(device_no, dialog_id, version):
+            logger.info(
+                f"AI dialog task became stale before TTS push | "
+                f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
+            )
             return
 
         logger.info(f"AI dialog reply received | deviceNo={device_no} | dialogId={dialog_id} | replyId={reply_id} | contentLength={len(reply_content)}")
@@ -352,13 +485,26 @@ async def _handle_ai_dialog_task(device_no: str, dialog_id: str, pcm_bytes: byte
         if not push_success:
             return
 
+        if not _is_current_dialog(device_no, dialog_id, version):
+            logger.info(
+                f"AI dialog task became stale after audio push | "
+                f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
+            )
+            return
+
         if _backend_client is not None:
             await _backend_client.report_dialog_completion(device_no, _current_time_str())
         logger.info(f"AI dialog pipeline completed | deviceNo={device_no} | dialogId={dialog_id} | replyId={reply_id}")
 
+    except asyncio.CancelledError:
+        logger.info(
+            f"AI dialog pipeline cancelled | deviceNo={device_no} | "
+            f"dialogId={dialog_id} | version={version} | node={selected_node or 'unknown'}"
+        )
+        raise
     except Exception as e:
         logger.error(f"AI dialog pipeline exception | deviceNo={device_no} | dialogId={dialog_id} | node={selected_node or 'unknown'} | error={type(e).__name__}: {str(e)[:300]}")
-        await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "AI dialog service error"})
+        await _send_current_dialog_error(device_no, dialog_id, version, "AI dialog service error")
 
 
 # ==================== POST接口：后端调用播报 ====================

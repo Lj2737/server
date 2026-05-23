@@ -94,7 +94,18 @@ class PiperTTSManager:
 
         audio_bytes = await self._request_tts(text.strip())
         pcm_bytes = self._normalize_audio_bytes(audio_bytes)
+        # from test_ import diagnostics
+        # diagnostics.check_normalized_pcm(pcm_bytes,len(audio_bytes))
 
+        # import numpy as np
+        # pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16)
+        # print(f"PCM数据预览（前100个采样点）：{pcm_array[:100]}")
+        # print(f"PCM数据统计：min={pcm_array.min()}, max={pcm_array.max()}, mean={pcm_array.mean():.2f}")
+        # print(f"音频时长：{len(pcm_bytes) / (16000 * 2):.2f}秒")
+
+        # # 保存PCM数据到文件（可以用Audacity打开分析）
+        # diagnostics.save_audio_to_disk(pcm_bytes, "pcm_normalized")
+        # # === 诊断代码结束 ===
         for start in range(0, len(pcm_bytes), TTS_PUSH_CHUNK_SIZE):
             chunk = pcm_bytes[start:start + TTS_PUSH_CHUNK_SIZE]
             if chunk:
