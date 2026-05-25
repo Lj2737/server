@@ -239,7 +239,18 @@ TTS_API_BASE_URL: str = _env_str(
 )
 TTS_API_KEY: str = _env_str("TTS_API_KEY")
 TTS_MODEL_NAME: str = _env_str("TTS_MODEL_NAME", "qwen3-tts-flash")
+TTS_REALTIME_MODEL_NAME: str = _env_str("TTS_REALTIME_MODEL_NAME", "qwen3-tts-flash-realtime")
+TTS_REALTIME_WS_URL: str = _env_str(
+    "TTS_REALTIME_WS_URL",
+    "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+)
+TTS_REALTIME_RESPONSE_FORMAT: str = _env_str(
+    "TTS_REALTIME_RESPONSE_FORMAT",
+    "PCM_24000HZ_MONO_16BIT",
+)
 TTS_VOICE: str = _env_str("TTS_VOICE", "Cherry")
+TTS_REALTIME_VOICE: str = _env_str("TTS_REALTIME_VOICE", TTS_VOICE)
+TTS_REALTIME_SPEECH_RATE: float = _env_float("TTS_REALTIME_SPEECH_RATE", 1.2)
 TTS_LANGUAGE_TYPE: str = _env_str("TTS_LANGUAGE_TYPE", "Chinese")
 TTS_API_TIMEOUT: float = _env_float("TTS_API_TIMEOUT", 60.0)
 TTS_RESPONSE_FORMAT: str = _env_str("TTS_RESPONSE_FORMAT", "wav")

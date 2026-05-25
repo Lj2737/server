@@ -37,19 +37,26 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_list(name: str, default: List[str]) -> List[str]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 # ==================== 服务配置 ====================
 # 算力节点监听端口（对内暴露，仅与主网关通信）
-SERVICE_PORT: int = 8091
+SERVICE_PORT: int = _env_int("SERVICE_PORT", 8091)
 # 算力节点监听地址
-SERVICE_HOST: str = "0.0.0.0"
+SERVICE_HOST: str = _env_str("SERVICE_HOST", "0.0.0.0")
 
 # 当前节点IP（用于健康检查返回，部署时按实际IP修改）
-NODE_IP: str = "192.168.1.101"
+NODE_IP: str = _env_str("NODE_IP", "127.0.0.1")
 
 
 # ==================== 调试模式 ====================
 # 开发调试时设为True，放行所有IP访问（生产环境必须设为False）
-DEBUG_MODE: bool = True
+DEBUG_MODE: bool = _env_bool("DEBUG_MODE", True)
 
 
 # ==================== 主网关IP白名单 ====================
@@ -59,7 +66,9 @@ DEBUG_MODE: bool = True
 GATEWAY_IP_WHITELIST: List[str] = [
     "192.168.1.100",  # 主网关节点IP
     "127.0.0.1",      # 本地回环，调试用
+    "192.168.43.11",
 ]
+GATEWAY_IP_WHITELIST = _env_list("GATEWAY_IP_WHITELIST", GATEWAY_IP_WHITELIST)
 
 
 # ==================== 并发控制 ====================
@@ -76,7 +85,7 @@ CACHE_CLEANUP_INTERVAL: int = 60
 
 # ==================== ASR模型配置（sherpa-onnx-sense-voice-small） ====================
 # 模型文件目录（包含model.onnx.int8和tokens.txt）
-ASR_MODEL_DIR: str = "E:/Project-python/server/compute-service/models/sherpa-onnx-sense-voice-small"
+ASR_MODEL_DIR: str = _env_str("ASR_MODEL_DIR", "E:/Project-python/server/compute-service/models/sherpa-onnx-sense-voice-small")
 # 采样率（固定16000Hz，直接适配sense-voice输入要求）
 ASR_SAMPLE_RATE: int = 16000
 # 识别语言：zh=中文

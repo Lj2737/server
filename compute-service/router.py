@@ -7,9 +7,11 @@
 4. POST /badge/v1/internal/algorithm/config/sync - 词库配置同步
 """
 import asyncio
+import json
 import time
 
 from fastapi import APIRouter, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from config import (
@@ -130,6 +132,7 @@ async def ai_dialog_chat(
     request_id: str = Form(..., description="Request ID, usually same as dialog_id"),
     knowledge_base_id: str = Form("", description="FastGPT knowledge base ID"),
     knowledge_base_id_camel: str = Form("", alias="knowledgeBaseId", description="FastGPT knowledge base ID"),
+    stream: bool = Form(False, description="Whether to stream FastGPT reply as NDJSON"),
 ):
     """
     AI对话推理接口：音频 -> ASR文本 -> FastGPT工作流回复。
@@ -158,6 +161,7 @@ async def ai_dialog_chat(
         )
 
     _increment_connections()
+    release_in_stream = False
     try:
         try:
             logger.info(
@@ -191,6 +195,73 @@ async def ai_dialog_chat(
                     msg="FastGPT knowledgeBaseId is required",
                     request_id=request_id,
                 )
+
+            if stream:
+                release_in_stream = True
+
+                async def stream_reply():
+                    reply_content_parts = []
+                    reply_id = dialog_id
+                    try:
+                        async for chunk in fastgpt_client.stream_chat(
+                            chat_id=chat_id,
+                            user_content=asr_text,
+                            knowledge_base_id=resolved_knowledge_base_id,
+                        ):
+                            reply_id = chunk.get("id") or reply_id
+                            content = chunk.get("content") or ""
+                            if not content:
+                                continue
+                            reply_content_parts.append(content)
+                            yield json.dumps(
+                                {
+                                    "type": "delta",
+                                    "id": reply_id,
+                                    "content": content,
+                                },
+                                ensure_ascii=False,
+                            ) + "\n"
+
+                        reply_content = "".join(reply_content_parts).strip()
+                        elapsed_ms = int((time.time() - start_time) * 1000)
+                        logger.info(
+                            f"AI dialog stream completed | request_id={request_id} | "
+                            f"dialog_id={dialog_id} | fastgptId={reply_id} | "
+                            f"asrLength={len(asr_text)} | replyLength={len(reply_content)} | "
+                            f"elapsed={elapsed_ms}ms"
+                        )
+                        yield json.dumps(
+                            {
+                                "type": "done",
+                                "id": reply_id,
+                                "content": reply_content,
+                                "asrText": asr_text,
+                            },
+                            ensure_ascii=False,
+                        ) + "\n"
+                    except Exception as e:
+                        logger.error(
+                            f"FastGPT stream failed | request_id={request_id} | "
+                            f"dialog_id={dialog_id} | error={str(e)[:300]}"
+                        )
+                        yield json.dumps(
+                            {
+                                "type": "error",
+                                "id": reply_id,
+                                "message": f"FastGPT对话失败: {str(e)}",
+                            },
+                            ensure_ascii=False,
+                        ) + "\n"
+                    finally:
+                        _semaphore.release()
+                        _decrement_connections()
+
+                return StreamingResponse(
+                    stream_reply(),
+                    media_type="application/x-ndjson",
+                    headers={"X-Accel-Buffering": "no"},
+                )
+
             try:
                 fastgpt_result = await fastgpt_client.chat(
                     chat_id=chat_id,
@@ -235,8 +306,9 @@ async def ai_dialog_chat(
                 request_id=request_id,
             )
     finally:
-        _semaphore.release()
-        _decrement_connections()
+        if not release_in_stream:
+            _semaphore.release()
+            _decrement_connections()
 
 @router.post(
     "/badge/v1/internal/algorithm/inference/behavior-recognition",

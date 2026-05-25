@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import importlib.util
 import io
 import json
+import sys
+import threading
 import wave
 from typing import AsyncGenerator, Optional
 
@@ -24,6 +27,11 @@ from config import (
     TTS_LANGUAGE_TYPE,
     TTS_MODEL_NAME,
     TTS_PUSH_CHUNK_SIZE,
+    TTS_REALTIME_MODEL_NAME,
+    TTS_REALTIME_RESPONSE_FORMAT,
+    TTS_REALTIME_SPEECH_RATE,
+    TTS_REALTIME_VOICE,
+    TTS_REALTIME_WS_URL,
     TTS_RESPONSE_FORMAT,
     TTS_TARGET_SAMPLE_RATE,
     TTS_VOICE,
@@ -115,6 +123,227 @@ class PiperTTSManager:
             f"TTS synthesis completed | textLength={len(text)} | "
             f"audioBytes={len(pcm_bytes)}"
         )
+
+    async def synthesize_realtime_stream(
+        self,
+        text_stream: AsyncGenerator[str, None],
+    ) -> AsyncGenerator[bytes, None]:
+        """Synthesize a text stream with DashScope realtime TTS and yield PCM chunks."""
+        if not self._is_loaded:
+            raise RuntimeError(f"TTS API client is not initialized | error={self._load_error}")
+
+        try:
+            import dashscope
+            from dashscope.audio.qwen_tts_realtime import AudioFormat, QwenTtsRealtime, QwenTtsRealtimeCallback
+        except ImportError as exc:
+            dashscope_spec = importlib.util.find_spec("dashscope")
+            dashscope_location = dashscope_spec.origin if dashscope_spec else "not found"
+            raise RuntimeError(
+                "dashscope realtime TTS SDK import failed. "
+                "Ensure dashscope>=1.25.11 is installed in the Python environment running gateway-service. "
+                f"python={sys.executable} | dashscope={dashscope_location} | "
+                f"Original import error: {exc}"
+            ) from exc
+        dashscope.api_key = TTS_API_KEY
+
+        loop = asyncio.get_running_loop()
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        error_future: asyncio.Future[BaseException] = loop.create_future()
+        stop_event = threading.Event()
+
+        class _RealtimeTTSCallback(QwenTtsRealtimeCallback):
+            def on_open(self) -> None:
+                logger.debug("Realtime TTS websocket opened")
+
+            def on_event(self, response) -> None:
+                try:
+                    event_type = response.get("type") if isinstance(response, dict) else ""
+                    if event_type == "response.audio.delta":
+                        audio_b64 = response.get("delta", "")
+                        if audio_b64:
+                            loop.call_soon_threadsafe(
+                                audio_queue.put_nowait,
+                                base64.b64decode(audio_b64),
+                            )
+                    elif event_type == "error":
+                        error = RuntimeError(f"Realtime TTS failed: {response}")
+                        if not error_future.done():
+                            loop.call_soon_threadsafe(error_future.set_result, error)
+                        loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+                    elif event_type == "session.finished":
+                        loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+                except BaseException as exc:
+                    if not error_future.done():
+                        loop.call_soon_threadsafe(error_future.set_result, exc)
+                    loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+
+            def on_close(self, close_status_code: int, close_msg: str) -> None:
+                logger.debug(
+                    f"Realtime TTS websocket closed | code={close_status_code} | msg={close_msg}"
+                )
+                loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+
+            def on_error(self, message: str) -> None:
+                error = RuntimeError(f"Realtime TTS failed: {message}")
+                if not error_future.done():
+                    loop.call_soon_threadsafe(error_future.set_result, error)
+                loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+
+        callback = _RealtimeTTSCallback()
+        synthesizer_holder: dict[str, object] = {}
+        producer_done = asyncio.Event()
+
+        def _run_text_producer() -> None:
+            synthesizer = None
+            try:
+                synthesizer = QwenTtsRealtime(
+                    model=TTS_REALTIME_MODEL_NAME,
+                    callback=callback,
+                    url=TTS_REALTIME_WS_URL,
+                )
+                synthesizer_holder["synthesizer"] = synthesizer
+                synthesizer.connect()
+                synthesizer.update_session(
+                    voice=TTS_REALTIME_VOICE,
+                    response_format=self._realtime_audio_format(AudioFormat),
+                    speech_rate=TTS_REALTIME_SPEECH_RATE,
+                    language_type=TTS_LANGUAGE_TYPE,
+                    mode="server_commit",
+                )
+                for item in text_iter:
+                    if stop_event.is_set():
+                        break
+                    if item:
+                        synthesizer.append_text(item)
+                if not stop_event.is_set():
+                    synthesizer.finish()
+            except BaseException as exc:
+                if not error_future.done():
+                    loop.call_soon_threadsafe(error_future.set_result, exc)
+                loop.call_soon_threadsafe(audio_queue.put_nowait, None)
+            finally:
+                loop.call_soon_threadsafe(producer_done.set)
+
+        text_iter = self._sync_text_iter(loop, text_stream)
+        producer_thread = threading.Thread(
+            target=_run_text_producer,
+            name="dashscope-realtime-tts",
+            daemon=True,
+        )
+        producer_thread.start()
+
+        total_bytes = 0
+        try:
+            while True:
+                if error_future.done():
+                    raise error_future.result()
+                chunk = await audio_queue.get()
+                if chunk is None:
+                    if error_future.done():
+                        raise error_future.result()
+                    break
+                normalized_chunk = self._normalize_realtime_pcm_chunk(chunk)
+                total_bytes += len(normalized_chunk)
+                if normalized_chunk:
+                    yield normalized_chunk
+        finally:
+            stop_event.set()
+            await text_iter.aclose()
+            synthesizer = synthesizer_holder.get("synthesizer")
+            if synthesizer is not None:
+                for method_name in ("close", "cancel"):
+                    close_method = getattr(synthesizer, method_name, None)
+                    if callable(close_method):
+                        try:
+                            close_method()
+                        except Exception as exc:
+                            logger.debug(f"Realtime TTS {method_name} failed | error={exc}")
+                        break
+            await producer_done.wait()
+            logger.info(f"Realtime TTS completed | audioBytes={total_bytes}")
+
+    @staticmethod
+    def _realtime_audio_format(audio_format_cls):
+        format_name = TTS_REALTIME_RESPONSE_FORMAT.strip()
+        if hasattr(audio_format_cls, format_name):
+            return getattr(audio_format_cls, format_name)
+        logger.warning(
+            f"Realtime TTS audio format not found | format={format_name}; "
+            "fallback=PCM_24000HZ_MONO_16BIT"
+        )
+        return getattr(audio_format_cls, "PCM_24000HZ_MONO_16BIT")
+
+    @staticmethod
+    def _realtime_source_sample_rate() -> int:
+        format_name = TTS_REALTIME_RESPONSE_FORMAT.upper()
+        if "24000HZ" in format_name:
+            return 24000
+        if "16000HZ" in format_name:
+            return 16000
+        if "8000HZ" in format_name:
+            return 8000
+        logger.warning(
+            f"Realtime TTS sample rate is unknown | format={TTS_REALTIME_RESPONSE_FORMAT}; "
+            "assume=24000"
+        )
+        return 24000
+
+    def _normalize_realtime_pcm_chunk(self, pcm_bytes: bytes) -> bytes:
+        source_sample_rate = self._realtime_source_sample_rate()
+        if source_sample_rate == TTS_TARGET_SAMPLE_RATE:
+            return pcm_bytes
+        return self._resample_pcm16_mono(
+            pcm_bytes,
+            source_sample_rate=source_sample_rate,
+            target_sample_rate=TTS_TARGET_SAMPLE_RATE,
+        )
+
+    @staticmethod
+    def _resample_pcm16_mono(
+        pcm_bytes: bytes,
+        source_sample_rate: int,
+        target_sample_rate: int,
+    ) -> bytes:
+        pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+        target_len = int(len(pcm_array) * target_sample_rate / source_sample_rate)
+        if target_len <= 0:
+            return b""
+
+        try:
+            from scipy.signal import resample
+
+            resampled = resample(pcm_array, target_len)
+            return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
+        except Exception as exc:
+            logger.warning(f"TTS PCM resample failed; using original PCM | error={exc}")
+            return pcm_bytes
+
+    @staticmethod
+    def _sync_text_iter(
+        loop: asyncio.AbstractEventLoop,
+        text_stream: AsyncGenerator[str, None],
+    ):
+        class _SyncTextIterator:
+            def __init__(self) -> None:
+                self._closed = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self) -> str:
+                if self._closed:
+                    raise StopIteration
+                future = asyncio.run_coroutine_threadsafe(text_stream.__anext__(), loop)
+                try:
+                    return future.result()
+                except StopAsyncIteration:
+                    raise StopIteration
+
+            async def aclose(self) -> None:
+                self._closed = True
+                await text_stream.aclose()
+
+        return _SyncTextIterator()
 
     async def _request_tts(self, text: str) -> bytes:
         """Call the non-streaming speech API and return audio bytes."""
@@ -287,19 +516,11 @@ class PiperTTSManager:
         if sample_rate == TTS_TARGET_SAMPLE_RATE:
             return pcm_bytes
 
-        pcm_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
-        target_len = int(len(pcm_array) * TTS_TARGET_SAMPLE_RATE / sample_rate)
-        if target_len <= 0:
-            return b""
-
-        try:
-            from scipy.signal import resample
-
-            resampled = resample(pcm_array, target_len)
-            return np.clip(resampled, -32768, 32767).astype(np.int16).tobytes()
-        except Exception as exc:
-            logger.warning(f"TTS WAV resample failed; using original PCM | error={exc}")
-            return pcm_bytes
+        return PiperTTSManager._resample_pcm16_mono(
+            pcm_bytes,
+            source_sample_rate=sample_rate,
+            target_sample_rate=TTS_TARGET_SAMPLE_RATE,
+        )
 
     def is_available(self) -> bool:
         return self._is_loaded and self._client is not None and not self._client.is_closed

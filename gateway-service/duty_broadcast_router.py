@@ -40,7 +40,7 @@ import time
 import wave
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from loguru import logger
@@ -403,6 +403,62 @@ async def _send_current_dialog_error(
     )
 
 
+async def _iter_compute_dialog_text(
+    response,
+    dialog_id: str,
+    state: Dict[str, str],
+) -> AsyncGenerator[str, None]:
+    async for line in response.aiter_lines():
+        if not line or not line.strip():
+            continue
+
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            logger.debug(f"AI dialog stream line ignored | dialogId={dialog_id} | line={line[:200]}")
+            continue
+
+        event_type = event.get("type")
+        if event.get("id"):
+            state["reply_id"] = str(event["id"])
+
+        if event_type == "error":
+            raise RuntimeError(str(event.get("message") or "AI dialog stream failed"))
+
+        if event_type == "delta":
+            content = str(event.get("content") or "")
+            if not content:
+                continue
+            state["reply_content"] += content
+            yield content
+            continue
+
+        if event_type == "done":
+            final_content = str(event.get("content") or "")
+            if final_content and len(final_content) > len(state["reply_content"]):
+                yield final_content[len(state["reply_content"]):]
+                state["reply_content"] = final_content
+            return
+
+
+async def _dialog_audio_stream_from_compute_response(
+    response,
+    device_no: str,
+    dialog_id: str,
+    version: int,
+    state: Dict[str, str],
+) -> AsyncGenerator[bytes, None]:
+    text_stream = _iter_compute_dialog_text(response, dialog_id, state)
+    emitted_audio = False
+    async for pcm_chunk in piper_tts_manager.synthesize_realtime_stream(text_stream):
+        if not _is_current_dialog(device_no, dialog_id, version):
+            return
+        emitted_audio = True
+        yield pcm_chunk
+    if not emitted_audio and _is_current_dialog(device_no, dialog_id, version):
+        raise RuntimeError("AI reply is empty")
+
+
 async def _handle_ai_dialog_task(device_no: str, dialog_id: str, version: int, pcm_bytes: bytes) -> None:
     """Forward dialog audio to compute, push FastGPT reply as TTS, then callback backend."""
     selected_node = None
@@ -443,46 +499,61 @@ async def _handle_ai_dialog_task(device_no: str, dialog_id: str, version: int, p
             "request_id": dialog_id,
             "knowledge_base_id": knowledge_base_id,
             "knowledgeBaseId": knowledge_base_id,
+            "stream": "true",
         }
 
         await node_manager.increment_connection(selected_node)
         try:
             client = await HttpClientSingleton.get_client()
-            response = await client.post(url=target_url, files=files, data=data, timeout=AI_DIALOG_REQUEST_TIMEOUT)
+            async with client.stream(
+                "POST",
+                url=target_url,
+                files=files,
+                data=data,
+                timeout=AI_DIALOG_REQUEST_TIMEOUT,
+            ) as response:
+                if not (200 <= response.status_code < 300):
+                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    logger.error(
+                        f"AI dialog compute failed | deviceNo={device_no} | "
+                        f"dialogId={dialog_id} | node={selected_node} | "
+                        f"status={response.status_code} | body={body[:500]}"
+                    )
+                    await _send_current_dialog_error(device_no, dialog_id, version, "AI dialog inference failed")
+                    return
+
+                if not _is_current_dialog(device_no, dialog_id, version):
+                    logger.info(
+                        f"AI dialog task became stale after compute response | "
+                        f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
+                    )
+                    return
+
+                stream_state = {
+                    "reply_id": dialog_id,
+                    "reply_content": "",
+                }
+                audio_stream = _dialog_audio_stream_from_compute_response(
+                    response=response,
+                    device_no=device_no,
+                    dialog_id=dialog_id,
+                    version=version,
+                    state=stream_state,
+                )
+                push_success = await ws_device_manager.push_dialog_audio_stream(
+                    device_no=device_no,
+                    dialog_id=dialog_id,
+                    audio_stream=audio_stream,
+                )
+                if not push_success:
+                    return
         finally:
             await node_manager.decrement_connection(selected_node)
 
-        if not _is_current_dialog(device_no, dialog_id, version):
-            logger.info(
-                f"AI dialog task became stale after compute response | "
-                f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
-            )
-            return
-
-        if not (200 <= response.status_code < 300):
-            logger.error(f"AI dialog compute failed | deviceNo={device_no} | dialogId={dialog_id} | node={selected_node} | status={response.status_code} | body={response.text[:500]}")
-            await _send_current_dialog_error(device_no, dialog_id, version, "AI dialog inference failed")
-            return
-
-        result = response.json()
-        payload = result.get("data") or {}
-        reply_id = payload.get("id") or dialog_id
-        reply_content = (payload.get("content") or "").strip()
+        reply_id = stream_state.get("reply_id") or dialog_id
+        reply_content = (stream_state.get("reply_content") or "").strip()
         if not reply_content:
             await _send_current_dialog_error(device_no, dialog_id, version, "AI reply is empty")
-            return
-
-        if not _is_current_dialog(device_no, dialog_id, version):
-            logger.info(
-                f"AI dialog task became stale before TTS push | "
-                f"deviceNo={device_no} | dialogId={dialog_id} | version={version}"
-            )
-            return
-
-        logger.info(f"AI dialog reply received | deviceNo={device_no} | dialogId={dialog_id} | replyId={reply_id} | contentLength={len(reply_content)}")
-        audio_stream = piper_tts_manager.synthesize_stream(reply_content)
-        push_success = await ws_device_manager.push_dialog_audio_stream(device_no=device_no, dialog_id=dialog_id, audio_stream=audio_stream)
-        if not push_success:
             return
 
         if not _is_current_dialog(device_no, dialog_id, version):
