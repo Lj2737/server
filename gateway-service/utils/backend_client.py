@@ -37,8 +37,9 @@
     await client.close()
 """
 import asyncio
+import inspect
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import httpx
 from loguru import logger
@@ -58,6 +59,8 @@ from config import (
     DIALOG_COMPLETION_CALLBACK_PATH,
     KNOWLEDGE_BASE_QUERY_PATH,
 )
+
+BADGE_BINDING_NOT_FOUND_CODE = 1022100006
 
 
 class BackendClient:
@@ -88,6 +91,16 @@ class BackendClient:
             return
         self._client: Optional[httpx.AsyncClient] = None
         self._initialized = False
+        self._badge_binding_missing_handler: Optional[
+            Callable[[str, str, str], Awaitable[None]]
+        ] = None
+
+    def set_badge_binding_missing_handler(
+        self,
+        handler: Callable[[str, str, str], Awaitable[None]],
+    ) -> None:
+        """注册胸牌绑定缺失错误的异步处理器。"""
+        self._badge_binding_missing_handler = handler
 
     async def initialize(self) -> None:
         """
@@ -603,6 +616,13 @@ class BackendClient:
                         f"状态码={response.status_code} | "
                         f"响应={error_body} | 耗时={elapsed_ms}ms"
                     )
+                    self._dispatch_badge_binding_missing_broadcast(
+                        response=response,
+                        path=path,
+                        json_body=json_body,
+                        params=params,
+                        data=data,
+                    )
                     response.raise_for_status()
 
                 else:
@@ -675,3 +695,91 @@ class BackendClient:
             f"后端请求失败，已重试{BACKEND_MAX_RETRIES}次 | "
             f"路径={path} | 最后错误={last_error}"
         )
+
+    def _dispatch_badge_binding_missing_broadcast(
+        self,
+        response: httpx.Response,
+        path: str,
+        json_body: Optional[Dict[str, Any]],
+        params: Optional[Dict[str, Any]],
+        data: Optional[Dict[str, str]],
+    ) -> None:
+        payload = self._safe_response_json(response)
+        if not self._is_badge_binding_missing_error(payload):
+            return
+
+        device_no = self._extract_device_no(json_body, params, data)
+        if not device_no:
+            logger.warning(
+                f"胸牌绑定缺失播报跳过 | path={path} | 原因=deviceNo不存在"
+            )
+            return
+
+        message = self._format_badge_binding_missing_broadcast(device_no, payload)
+        handler = self._badge_binding_missing_handler
+        if handler is None:
+            logger.warning(
+                f"胸牌绑定缺失播报跳过 | deviceNo={device_no} | "
+                f"path={path} | 原因=未注册播报处理器 | 内容={message}"
+            )
+            return
+
+        async def _run_broadcast() -> None:
+            try:
+                result = handler(device_no, message, path)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.error(
+                    f"胸牌绑定缺失播报失败 | deviceNo={device_no} | "
+                    f"path={path} | 错误类型={type(exc).__name__} | 错误={str(exc)[:300]}"
+                )
+
+        try:
+            asyncio.create_task(_run_broadcast())
+            logger.info(
+                f"胸牌绑定缺失播报任务已创建 | deviceNo={device_no} | "
+                f"path={path} | 内容={message}"
+            )
+        except RuntimeError as exc:
+            logger.error(
+                f"胸牌绑定缺失播报任务创建失败 | deviceNo={device_no} | "
+                f"path={path} | 错误={exc}"
+            )
+
+    @staticmethod
+    def _safe_response_json(response: httpx.Response) -> Dict[str, Any]:
+        try:
+            payload = response.json()
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _is_badge_binding_missing_error(payload: Dict[str, Any]) -> bool:
+        code = payload.get("code")
+        msg = str(payload.get("msg") or payload.get("message") or "")
+        return code == BADGE_BINDING_NOT_FOUND_CODE or "胸牌绑定记录不存在" in msg
+
+    @staticmethod
+    def _extract_device_no(
+        json_body: Optional[Dict[str, Any]],
+        params: Optional[Dict[str, Any]],
+        data: Optional[Dict[str, str]],
+    ) -> str:
+        for source in (json_body, params, data):
+            if not isinstance(source, dict):
+                continue
+            for key in ("deviceNo", "device_no", "deviceId", "device_id"):
+                value = source.get(key)
+                if value:
+                    return str(value).strip()
+        return ""
+
+    @staticmethod
+    def _format_badge_binding_missing_broadcast(
+        device_no: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        raw_msg = str(payload.get("msg") or payload.get("message") or "胸牌绑定记录不存在")
+        return f"设备{device_no}{raw_msg}，请检查后端胸牌绑定配置。"

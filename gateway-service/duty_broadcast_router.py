@@ -112,7 +112,53 @@ def initialize_ai_dialog(backend_client: BackendClient) -> None:
     """Inject backend client for knowledge-base lookup and dialog completion callback."""
     global _backend_client
     _backend_client = backend_client
+    backend_client.set_badge_binding_missing_handler(_broadcast_badge_binding_missing)
     logger.info("AI dialog WebSocket pipeline initialized")
+
+
+async def _broadcast_badge_binding_missing(
+    device_no: str,
+    broadcast_content: str,
+    source_path: str,
+) -> None:
+    """Broadcast backend badge-binding-missing errors without blocking the caller."""
+    try:
+        if not piper_tts_manager.is_available():
+            logger.warning(
+                f"Badge binding missing broadcast skipped | deviceNo={device_no} | "
+                f"path={source_path} | reason=TTS unavailable | error={piper_tts_manager.load_error}"
+            )
+            return
+
+        if not ws_device_manager.is_device_online(device_no):
+            logger.warning(
+                f"Badge binding missing broadcast skipped | deviceNo={device_no} | "
+                f"path={source_path} | reason=device offline | content={broadcast_content}"
+            )
+            return
+
+        audio_stream = piper_tts_manager.synthesize_stream(broadcast_content)
+        success = await ws_device_manager.push_audio_stream(
+            device_no=device_no,
+            audio_stream=audio_stream,
+            broadcast_content=broadcast_content,
+        )
+        if not success:
+            logger.warning(
+                f"Badge binding missing broadcast push failed | deviceNo={device_no} | "
+                f"path={source_path}"
+            )
+            return
+
+        logger.info(
+            f"Badge binding missing broadcast completed | deviceNo={device_no} | "
+            f"path={source_path}"
+        )
+    except Exception as exc:
+        logger.error(
+            f"Badge binding missing broadcast exception | deviceNo={device_no} | "
+            f"path={source_path} | errorType={type(exc).__name__} | error={str(exc)[:300]}"
+        )
 
 
 def _next_dialog_version(device_no: str) -> int:
