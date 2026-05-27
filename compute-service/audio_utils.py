@@ -230,7 +230,11 @@ def ensure_mono_audio(audio_bytes: bytes) -> bytes:
     return _convert_to_mono(audio_bytes)
 
 
-def clip_abnormal_audio(audio_bytes: bytes) -> str:
+def clip_abnormal_audio(
+    audio_bytes: bytes,
+    asr_text: str = "",
+    keyword_content: str = "",
+) -> str:
     """
     裁剪异常行为音频片段
     - 仅在behavior_type=ABNORMAL时调用
@@ -251,10 +255,13 @@ def clip_abnormal_audio(audio_bytes: bytes) -> str:
             total_frames = wf.getnframes()
             total_duration = total_frames / frame_rate
 
-            # 计算裁剪帧数
-            clip_frames = int(ABNORMAL_CLIP_TOTAL_SECONDS * frame_rate)
+            trigger_seconds = _estimate_trigger_seconds(
+                total_duration=total_duration,
+                asr_text=asr_text,
+                keyword_content=keyword_content,
+            )
 
-            if total_frames <= clip_frames:
+            if total_duration <= ABNORMAL_CLIP_TOTAL_SECONDS:
                 # 音频短于15秒，取全部音频
                 start_frame = 0
                 read_frames = total_frames
@@ -263,17 +270,37 @@ def clip_abnormal_audio(audio_bytes: bytes) -> str:
                     f"音频时长={total_duration:.2f}s | 裁剪目标={ABNORMAL_CLIP_TOTAL_SECONDS}s"
                 )
             else:
-                # 从末尾往前取15秒（末尾视为触发时刻）
-                start_frame = total_frames - clip_frames
-                read_frames = clip_frames
+                start_seconds = max(0.0, trigger_seconds - ABNORMAL_CLIP_BEFORE_SECONDS)
+                end_seconds = min(total_duration, trigger_seconds + ABNORMAL_CLIP_AFTER_SECONDS)
+
+                if end_seconds - start_seconds < ABNORMAL_CLIP_TOTAL_SECONDS:
+                    if start_seconds <= 0:
+                        end_seconds = min(total_duration, ABNORMAL_CLIP_TOTAL_SECONDS)
+                    elif end_seconds >= total_duration:
+                        start_seconds = max(0.0, total_duration - ABNORMAL_CLIP_TOTAL_SECONDS)
+
+                start_frame = int(start_seconds * frame_rate)
+                end_frame = min(total_frames, int(end_seconds * frame_rate))
+                read_frames = max(0, end_frame - start_frame)
                 logger.debug(
-                    f"正常裁剪 | 起始帧={start_frame} | 裁剪帧数={read_frames} | "
-                    f"音频时长={total_duration:.2f}s"
+                    f"异常音频按关键词位置裁剪 | keyword={keyword_content} | "
+                    f"trigger={trigger_seconds:.2f}s | start={start_seconds:.2f}s | "
+                    f"end={end_seconds:.2f}s | 起始帧={start_frame} | "
+                    f"裁剪帧数={read_frames} | 音频时长={total_duration:.2f}s"
                 )
 
             # 定位到起始帧并读取
             wf.setpos(start_frame)
             frames_data = wf.readframes(read_frames)
+
+            if not frames_data:
+                logger.warning(
+                    f"异常音频裁剪结果为空，回退为整段音频 | "
+                    f"音频时长={total_duration:.2f}s | keyword={keyword_content}"
+                )
+                wf.setpos(0)
+                frames_data = wf.readframes(total_frames)
+                read_frames = total_frames
 
         # 创建新的WAV字节流（确保格式：16000Hz、16bit、单声道）
         output_buffer = io.BytesIO()
@@ -297,6 +324,26 @@ def clip_abnormal_audio(audio_bytes: bytes) -> str:
     except Exception as e:
         logger.exception(f"异常音频裁剪失败 | 错误={e}")
         return ""
+
+
+def _estimate_trigger_seconds(
+    total_duration: float,
+    asr_text: str = "",
+    keyword_content: str = "",
+) -> float:
+    source_text = (asr_text or "").strip()
+    keyword = (keyword_content or "").strip()
+    if not source_text or not keyword:
+        return total_duration
+
+    keyword_index = source_text.find(keyword)
+    if keyword_index < 0:
+        return total_duration
+
+    midpoint = keyword_index + len(keyword) / 2
+    ratio = midpoint / max(len(source_text), 1)
+    ratio = max(0.0, min(1.0, ratio))
+    return total_duration * ratio
 
 
 def get_audio_duration(audio_bytes: bytes) -> float:

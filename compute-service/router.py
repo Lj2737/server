@@ -452,6 +452,36 @@ async def behavior_recognition(
                 )
             ).strip()
             is_abnormal = llm_result.get("is_abnormal", behavior_type == BehaviorType.ABNORMAL)
+            keyword_matches = keyword_config_manager.find_keyword_matches(asr_text)
+
+            if keyword_matches:
+                match_behavior_types = {match.get("behavior_type") for match in keyword_matches}
+                if BehaviorType.ABNORMAL in match_behavior_types:
+                    behavior_type = BehaviorType.ABNORMAL
+                    is_abnormal = True
+                elif BehaviorType.CUSTOMER in match_behavior_types:
+                    behavior_type = BehaviorType.CUSTOMER
+                    is_abnormal = False
+                elif BehaviorType.STANDARD in match_behavior_types:
+                    behavior_type = BehaviorType.STANDARD
+                    is_abnormal = False
+
+                preferred_match = next(
+                    (
+                        match
+                        for target_type in (BehaviorType.ABNORMAL, BehaviorType.CUSTOMER, BehaviorType.STANDARD)
+                        for match in keyword_matches
+                        if match.get("behavior_type") == target_type
+                    ),
+                    keyword_matches[0],
+                )
+                config_item_id = str(preferred_match.get("config_item_id") or "").strip()
+                keyword_content = str(preferred_match.get("keyword_content") or "").strip()
+                logger.info(
+                    f"Local keyword matches found | request_id={request_id} | "
+                    f"count={len(keyword_matches)} | behavior_type={behavior_type} | "
+                    f"first_config_item_id={config_item_id} | first_keyword_content={keyword_content}"
+                )
 
             if behavior_type == BehaviorType.ABNORMAL and (
                 not config_item_id or not keyword_content
@@ -481,7 +511,11 @@ async def behavior_recognition(
             if behavior_type == BehaviorType.ABNORMAL:
                 # 仅异常行为时裁剪音频片段
                 logger.info(f"异常行为音频裁剪 | request_id={request_id}")
-                abnormal_audio_clip = clip_abnormal_audio(audio_bytes)
+                abnormal_audio_clip = clip_abnormal_audio(
+                    audio_bytes,
+                    asr_text=asr_text,
+                    keyword_content=keyword_content,
+                )
                 if not abnormal_audio_clip:
                     logger.warning(f"异常音频裁剪失败，不返回音频片段 | request_id={request_id}")
 
@@ -491,6 +525,7 @@ async def behavior_recognition(
                 "summary": llm_result.get("summary", ""),
                 "config_item_id": config_item_id,
                 "keyword_content": keyword_content,
+                "keyword_matches": keyword_matches,
                 "is_abnormal": is_abnormal,
             }
             # 仅ABNORMAL时返回异常音频片段

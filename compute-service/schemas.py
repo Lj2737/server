@@ -268,6 +268,10 @@ class BehaviorResultData(BaseModel):
         "",
         description="命中的关键词内容，回调后端时映射为keywordContent",
     )
+    keyword_matches: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="命中的全部关键词列表，包含config_item_id、keyword_content、behavior_type等字段",
+    )
     is_abnormal: bool = Field(..., description="是否异常行为")
     abnormal_audio_clip: Optional[str] = Field(
         None,

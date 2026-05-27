@@ -195,23 +195,56 @@ class KeywordConfigManager:
         return self._keyword_groups
 
     def find_keyword_match(self, group_key: str, text: str) -> Optional[Dict[str, str]]:
+        matches = self.find_keyword_matches(text, group_key=group_key)
+        return matches[0] if matches else None
+
+    def find_keyword_matches(
+        self,
+        text: str,
+        group_key: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
         source_text = (text or "").strip()
         if not source_text:
-            return None
+            return []
 
         normalized_source = source_text.lower()
-        for config_item in self._keyword_groups.get(group_key, []):
-            config_item_id = str(config_item.get("configItemId", "")).strip()
-            if not config_item_id:
-                continue
-            for keyword in config_item.get("keywords", []) or []:
-                content = str(keyword.get("content", "")).strip()
-                if content and content.lower() in normalized_source:
-                    return {
-                        "config_item_id": config_item_id,
-                        "keyword_content": content,
-                    }
-        return None
+        group_keys = [group_key] if group_key else ["forbidden", "customer", "sop"]
+        behavior_type_map = {
+            "forbidden": "ABNORMAL",
+            "customer": "CUSTOMER",
+            "sop": "STANDARD",
+        }
+
+        matches: List[Dict[str, str]] = []
+        seen = set()
+        for current_group_key in group_keys:
+            for config_item in self._keyword_groups.get(current_group_key, []):
+                config_item_id = str(config_item.get("configItemId", "")).strip()
+                if not config_item_id:
+                    continue
+                config_item_name = str(config_item.get("configItemName", "")).strip()
+                for keyword in config_item.get("keywords", []) or []:
+                    content = str(keyword.get("content", "")).strip()
+                    if not content or content.lower() not in normalized_source:
+                        continue
+                    keyword_id = str(keyword.get("id", "")).strip()
+                    dedupe_key = (current_group_key, config_item_id, keyword_id, content)
+                    if dedupe_key in seen:
+                        continue
+                    seen.add(dedupe_key)
+                    matches.append(
+                        {
+                            "config_group": current_group_key,
+                            "behavior_type": behavior_type_map.get(current_group_key, "STANDARD"),
+                            "config_item_id": config_item_id,
+                            "configItemId": config_item_id,
+                            "config_item_name": config_item_name,
+                            "keyword_id": keyword_id,
+                            "keyword_content": content,
+                            "keywordContent": content,
+                        }
+                    )
+        return matches
 
     @staticmethod
     def _normalize_config_data(config_data: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:

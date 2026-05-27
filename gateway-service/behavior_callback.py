@@ -58,7 +58,9 @@ metadata格式（v3.1文档5.2节）：
     ))
 """
 import base64
+import io
 import json
+import wave
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -149,6 +151,42 @@ class BehaviorCallback:
             logger.error("行为识别回调处理器未初始化，跳过回调")
             return
 
+        keyword_matches = self._normalize_keyword_matches(inference_data)
+        if len(keyword_matches) > 1 and not inference_data.get("_skip_keyword_match_grouping"):
+            grouped_matches = self._group_keyword_matches_by_type(keyword_matches)
+            logger.info(
+                f"行为识别命中多个关键词，按类型分组回调 | deviceNo={device_no} | "
+                f"total={len(keyword_matches)} | groups={list(grouped_matches.keys())}"
+            )
+            for grouped_behavior_type, grouped_items in grouped_matches.items():
+                if not grouped_items:
+                    continue
+                per_group_data = dict(inference_data)
+                per_group_data["_skip_keyword_match_grouping"] = True
+                per_group_data["behavior_type"] = grouped_behavior_type
+                config_item_id = grouped_items[0]["config_item_id"]
+                keyword_content = self._join_unique_values(
+                    item["keyword_content"] for item in grouped_items
+                )
+                per_group_data["config_item_id"] = config_item_id
+                per_group_data["configItemId"] = config_item_id
+                per_group_data["keyword_content"] = keyword_content
+                per_group_data["keywordContent"] = keyword_content
+                per_group_data["keyword_matches"] = grouped_items
+                await self.handle_result(per_group_data, device_no=device_no, event_time=event_time)
+            return
+
+        if len(keyword_matches) == 1:
+            inference_data = dict(inference_data)
+            inference_data["behavior_type"] = keyword_matches[0].get(
+                "behavior_type",
+                inference_data.get("behavior_type", BehaviorType.STANDARD),
+            )
+            inference_data["config_item_id"] = keyword_matches[0].get("config_item_id", "")
+            inference_data["configItemId"] = keyword_matches[0].get("config_item_id", "")
+            inference_data["keyword_content"] = keyword_matches[0].get("keyword_content", "")
+            inference_data["keywordContent"] = keyword_matches[0].get("keyword_content", "")
+
         # ========== 步骤2：调用IdGenerator生成全局唯一eventId ==========
         event_id = IdGenerator.generate_behavior_id()
 
@@ -210,17 +248,29 @@ class BehaviorCallback:
             try:
                 # base64解码异常音频片段
                 audio_bytes = base64.b64decode(abnormal_audio_clip)
-                files = {
-                    "file": (
-                        f"{event_id}.wav",   # 文件名
-                        audio_bytes,          # 文件字节
-                        "audio/wav",          # Content-Type
-                    ),
-                }
-                logger.info(
-                    f"异常行为音频片段已附加 | eventId={event_id} | "
-                    f"音频大小={len(audio_bytes) / 1024:.1f}KB"
-                )
+                wav_info = self._inspect_wav_audio(audio_bytes)
+                if not wav_info["valid"]:
+                    logger.error(
+                        f"异常行为音频片段无效，跳过文件上传 | eventId={event_id} | "
+                        f"原因={wav_info['reason']} | 音频大小={len(audio_bytes)}"
+                    )
+                    files = None
+                else:
+                    files = {
+                        "file": (
+                            f"{event_id}.wav",   # 文件名
+                            audio_bytes,          # 文件字节
+                            "audio/wav",          # Content-Type
+                        ),
+                    }
+                    logger.info(
+                        f"异常行为音频片段已附加 | eventId={event_id} | "
+                        f"音频大小={len(audio_bytes) / 1024:.1f}KB | "
+                        f"时长={wav_info['duration']:.2f}s | "
+                        f"采样率={wav_info['sample_rate']}Hz | "
+                        f"声道={wav_info['channels']} | "
+                        f"位深={wav_info['sample_width'] * 8}bit"
+                    )
             except Exception as e:
                 logger.error(
                     f"异常音频base64解码失败 | eventId={event_id} | "
@@ -279,6 +329,98 @@ class BehaviorCallback:
             if value_str:
                 return value_str
         return ""
+
+    @staticmethod
+    def _inspect_wav_audio(audio_bytes: bytes) -> Dict[str, Any]:
+        if len(audio_bytes) < 44 or audio_bytes[:4] != b"RIFF":
+            return {"valid": False, "reason": "不是有效WAV/RIFF数据"}
+        try:
+            with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+                frame_rate = wf.getframerate()
+                frames = wf.getnframes()
+                channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                duration = frames / frame_rate if frame_rate else 0.0
+        except Exception as exc:
+            return {"valid": False, "reason": f"WAV解析失败: {exc}"}
+        if frames <= 0 or duration <= 0:
+            return {"valid": False, "reason": "WAV没有有效音频帧"}
+        return {
+            "valid": True,
+            "reason": "",
+            "duration": duration,
+            "sample_rate": frame_rate,
+            "channels": channels,
+            "sample_width": sample_width,
+        }
+
+    @staticmethod
+    def _normalize_keyword_matches(inference_data: Dict[str, Any]) -> list:
+        raw_matches = (
+            inference_data.get("keyword_matches")
+            or inference_data.get("keywordMatches")
+            or []
+        )
+        if not isinstance(raw_matches, list):
+            return []
+
+        normalized = []
+        seen = set()
+        for raw_match in raw_matches:
+            if not isinstance(raw_match, dict):
+                continue
+            config_item_id = BehaviorCallback._first_non_empty(
+                raw_match.get("config_item_id"),
+                raw_match.get("configItemId"),
+                raw_match.get("configitemid"),
+            )
+            keyword_content = BehaviorCallback._first_non_empty(
+                raw_match.get("keyword_content"),
+                raw_match.get("keywordContent"),
+                raw_match.get("keywordcontent"),
+            )
+            if not config_item_id or not keyword_content:
+                continue
+            behavior_type = BehaviorCallback._validate_behavior_type(
+                raw_match.get(
+                    "behavior_type",
+                    raw_match.get("behaviorType", inference_data.get("behavior_type", BehaviorType.STANDARD)),
+                )
+            )
+            dedupe_key = (behavior_type, config_item_id, keyword_content)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append(
+                {
+                    "behavior_type": behavior_type,
+                    "config_item_id": config_item_id,
+                    "keyword_content": keyword_content,
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _group_keyword_matches_by_type(keyword_matches: list) -> Dict[str, list]:
+        grouped: Dict[str, list] = {}
+        for match in keyword_matches:
+            behavior_type = BehaviorCallback._validate_behavior_type(
+                match.get("behavior_type", BehaviorType.STANDARD)
+            )
+            grouped.setdefault(behavior_type, []).append(match)
+        return grouped
+
+    @staticmethod
+    def _join_unique_values(values) -> str:
+        joined_values = []
+        seen = set()
+        for value in values:
+            value_str = str(value or "").strip()
+            if not value_str or value_str in seen:
+                continue
+            seen.add(value_str)
+            joined_values.append(value_str)
+        return ",".join(joined_values)
 
     @staticmethod
     def _format_event_time(event_time: str) -> str:
