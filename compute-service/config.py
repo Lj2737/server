@@ -238,9 +238,12 @@ BEHAVIOR_SYSTEM_PROMPT: str = (
     '  "behavior_type": "枚举值",\n'
     '  "summary": "100字以内的行为摘要",\n'
     '  "config_item_id": "命中的配置项ID，未命中时为空字符串",\n'
-    '  "keyword_content": "命中的关键词内容，未命中时为空字符串",\n'
+    '  "keyword_content": "命中的词库关键词内容；精确命中或语义命中都必须填写本地词库配置中已有的关键词，未命中时为空字符串",\n'
     '  "is_abnormal": true或false\n'
     "}\n"
+    "规则：可以进行语义匹配，不要求员工原话与词库关键词完全一致；"
+    "但keyword_content必须来自本地词库配置中的keywords.content，"
+    "且必须选择与员工语音语义最接近的词库关键词，禁止选择明显不相关的词库示例词。\n"
     "注意：仅输出JSON，不要输出任何其他自然语言解释、Markdown格式或代码块标记。"
 )
 

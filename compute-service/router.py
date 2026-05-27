@@ -7,7 +7,9 @@
 4. POST /badge/v1/internal/algorithm/config/sync - 词库配置同步
 """
 import asyncio
+import difflib
 import json
+import re
 import time
 
 from fastapi import APIRouter, UploadFile, File, Form
@@ -42,6 +44,95 @@ from schemas import (
 
 # 创建API路由器
 router = APIRouter()
+
+
+def _keyword_content_in_asr(keyword_content: str, asr_text: str) -> bool:
+    keyword = (keyword_content or "").strip()
+    source = (asr_text or "").strip()
+    if not keyword or not source:
+        return False
+    return keyword in source or keyword.replace(" ", "") in source.replace(" ", "")
+
+
+def _extract_text_segments(asr_text: str) -> list[str]:
+    source = (asr_text or "").strip()
+    if not source:
+        return []
+    segments = [source]
+    segments.extend(
+        item.strip()
+        for item in re.split(r"[。！？!?；;\n\r，,]", source)
+        if item.strip()
+    )
+    return segments
+
+
+def _keyword_similarity(keyword: str, text: str) -> float:
+    keyword = (keyword or "").strip()
+    text = (text or "").strip()
+    if not keyword or not text:
+        return 0.0
+    if keyword in text:
+        return 1.0
+    keyword_chars = {char for char in keyword if not char.isspace()}
+    text_chars = {char for char in text if not char.isspace()}
+    overlap = len(keyword_chars & text_chars) / max(len(keyword_chars), 1)
+    sequence = difflib.SequenceMatcher(None, keyword, text).ratio()
+    return max(overlap, sequence)
+
+
+def _find_semantic_keyword_from_config(
+    keyword_config_manager: KeywordConfigManager,
+    config_item_id: str,
+    asr_text: str,
+    min_score: float = 0.55,
+) -> str:
+    config_item_id = (config_item_id or "").strip()
+    if not config_item_id:
+        return ""
+
+    segments = _extract_text_segments(asr_text)
+    if not segments:
+        return ""
+
+    best_keyword = ""
+    best_score = 0.0
+    for config_items in keyword_config_manager.get_keyword_groups().values():
+        for config_item in config_items:
+            if str(config_item.get("configItemId", "")).strip() != config_item_id:
+                continue
+            for keyword in config_item.get("keywords", []) or []:
+                content = str(keyword.get("content", "")).strip()
+                if not content:
+                    continue
+                score = max(_keyword_similarity(content, segment) for segment in segments)
+                if score > best_score:
+                    best_score = score
+                    best_keyword = content
+
+    if best_keyword and best_score >= min_score:
+        return best_keyword
+    logger.warning(
+        f"Semantic keyword rejected; no close keyword in config | "
+        f"config_item_id={config_item_id} | best_keyword={best_keyword} | "
+        f"best_score={best_score:.2f} | min_score={min_score}"
+    )
+    return ""
+
+
+def _ensure_keyword_content_from_config(
+    keyword_config_manager: KeywordConfigManager,
+    config_item_id: str,
+    asr_text: str,
+    keyword_content: str,
+) -> str:
+    if _keyword_content_in_asr(keyword_content, asr_text):
+        return keyword_content.strip()
+    return _find_semantic_keyword_from_config(
+        keyword_config_manager=keyword_config_manager,
+        config_item_id=config_item_id,
+        asr_text=asr_text,
+    )
 
 # 全局并发控制信号量（单节点最大5路并发）
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
@@ -451,6 +542,7 @@ async def behavior_recognition(
                     ),
                 )
             ).strip()
+            summary = str(llm_result.get("summary", "")).strip()
             is_abnormal = llm_result.get("is_abnormal", behavior_type == BehaviorType.ABNORMAL)
             keyword_matches = keyword_config_manager.find_keyword_matches(asr_text)
 
@@ -496,6 +588,22 @@ async def behavior_recognition(
                         f"keyword_content={keyword_content}"
                     )
 
+            if config_item_id and not keyword_matches:
+                corrected_keyword_content = _ensure_keyword_content_from_config(
+                    keyword_config_manager=keyword_config_manager,
+                    config_item_id=config_item_id,
+                    asr_text=asr_text,
+                    keyword_content=keyword_content,
+                )
+                if corrected_keyword_content != keyword_content:
+                    logger.info(
+                        f"Semantic keyword content corrected from config | request_id={request_id} | "
+                        f"config_item_id={config_item_id} | "
+                        f"original_keyword_content={keyword_content} | "
+                        f"corrected_keyword_content={corrected_keyword_content}"
+                    )
+                    keyword_content = corrected_keyword_content
+
             if behavior_type == BehaviorType.ABNORMAL and (
                 not config_item_id or not keyword_content
             ):
@@ -522,7 +630,7 @@ async def behavior_recognition(
             # ========== ⑦ 封装结果 ==========
             result_data = {
                 "behavior_type": behavior_type,
-                "summary": llm_result.get("summary", ""),
+                "summary": summary,
                 "config_item_id": config_item_id,
                 "keyword_content": keyword_content,
                 "keyword_matches": keyword_matches,
