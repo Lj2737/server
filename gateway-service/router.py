@@ -27,6 +27,11 @@ from config import (
     REQUEST_ID_HEADER,
     DIALOG_COMPLETION_CALLBACK_PATH,
     DIALOG_COMPLETED_INTERNAL_PATH,
+    GATEWAY_FIRMWARE_VERSION,
+    GATEWAY_MANAGED_DEVICE_COUNT,
+    GATEWAY_NAME,
+    GATEWAY_REGION,
+    GATEWAY_ROLE,
     KNOWLEDGE_BASE_INTERNAL_PATH,
     ConfigType,
 )
@@ -35,6 +40,7 @@ from node_manager import NodeManager
 from http_client import HttpClientSingleton
 from behavior_callback import BehaviorCallback
 from utils import BackendClient
+from websocket_device_manager import WebSocketDeviceManager
 from exception import (
     GatewayException,
     ErrorCode,
@@ -56,6 +62,7 @@ _dialog_backend_client: BackendClient = None
 
 # 知识库ID缓存实例（单例）
 knowledge_base_cache = KnowledgeBaseCache()
+ws_device_manager = WebSocketDeviceManager()
 
 
 def initialize_dialog_callback(backend_client: BackendClient) -> None:
@@ -119,6 +126,37 @@ async def get_nodes_status():
         "code": 200,
         "msg": "ok",
         "data": nodes,
+        "request_id": str(uuid.uuid4()),
+    }
+
+
+@router.get("/badge/v1/algorithm/device-status")
+async def get_gateway_device_status():
+    """
+    后端展示用网关设备状态接口。
+
+    返回网关名称、角色/区域、当前在线硬件数量、在线率和固件版本。
+    在线硬件数量来自 WebSocketDeviceManager，即当前开机并连接网关的设备数。
+    """
+    online_devices = ws_device_manager.get_online_devices()
+    online_count = len(online_devices)
+    total_count = GATEWAY_MANAGED_DEVICE_COUNT if GATEWAY_MANAGED_DEVICE_COUNT > 0 else online_count
+    online_rate = round(online_count / total_count * 100, 1) if total_count > 0 else 0.0
+
+    return {
+        "code": 200,
+        "msg": "ok",
+        "data": {
+            "gatewayName": GATEWAY_NAME,
+            "gatewayRole": GATEWAY_ROLE,
+            "gatewayRegion": GATEWAY_REGION,
+            "connectedDeviceCount": online_count,
+            "managedDeviceCount": total_count,
+            "onlineRate": online_rate,
+            "onlineRateText": f"{online_rate:.1f}%",
+            "firmwareVersion": GATEWAY_FIRMWARE_VERSION,
+            "onlineDevices": online_devices,
+        },
         "request_id": str(uuid.uuid4()),
     }
 

@@ -41,6 +41,11 @@ def _env_bool(name: str, default: bool) -> bool:
 # Gateway server
 GATEWAY_PORT: int = _env_int("GATEWAY_PORT", 8090)
 GATEWAY_HOST: str = _env_str("GATEWAY_HOST", "0.0.0.0")
+GATEWAY_NAME: str = _env_str("GATEWAY_NAME", "GW-001")
+GATEWAY_REGION: str = _env_str("GATEWAY_REGION", "全店区域")
+GATEWAY_ROLE: str = _env_str("GATEWAY_ROLE", "主网关")
+GATEWAY_FIRMWARE_VERSION: str = _env_str("GATEWAY_FIRMWARE_VERSION", "v2.1.3")
+GATEWAY_MANAGED_DEVICE_COUNT: int = _env_int("GATEWAY_MANAGED_DEVICE_COUNT", 0)
 
 
 # Compute nodes
