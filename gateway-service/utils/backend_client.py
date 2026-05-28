@@ -94,6 +94,7 @@ class BackendClient:
         self._badge_binding_missing_handler: Optional[
             Callable[[str, str, str], Awaitable[None]]
         ] = None
+        self._recent_device_event_keys: Dict[tuple, float] = {}
 
     def set_badge_binding_missing_handler(
         self,
@@ -291,6 +292,8 @@ class BackendClient:
             True: 转发成功（后端返回2xx）
             False: 转发失败（重试耗尽、4xx错误、客户端未初始化）
         """
+        event_data = self._normalize_device_event_for_backend(event_data)
+
         # 前置检查：客户端是否可用
         if not self._initialized or self._client is None or self._client.is_closed:
             logger.error(
@@ -299,7 +302,15 @@ class BackendClient:
             )
             return False
 
-        # 提取关键业务字段用于日志（不修改原始数据）
+        if self._is_duplicate_device_event(event_data):
+            logger.info(
+                "Skip duplicate device heartbeat forward | "
+                f"deviceNo={event_data.get('deviceNo', 'unknown')} | "
+                f"payload={event_data.get('payload', {})}"
+            )
+            return True
+
+        # 提取关键业务字段用于日志
         device_no = event_data.get("deviceNo", "未知")
         event_type = event_data.get("eventType", "未知")
         report_time = event_data.get("reportTime", "未知")
@@ -414,6 +425,55 @@ class BackendClient:
             f"{str(last_error)[:200] if last_error else ''} | "
             f"完整原始数据={event_data}"
         )
+        return False
+
+    @staticmethod
+    def _normalize_device_event_for_backend(event_data: dict) -> dict:
+        normalized = dict(event_data or {})
+        if normalized.get("eventType") != "HEARTBEAT":
+            return normalized
+
+        normalized["reportTime"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        payload = dict(normalized.get("payload") or {})
+        if "signalPercent" not in payload and "signalLevel" in payload:
+            try:
+                payload["signalPercent"] = int(payload["signalLevel"]) * 20
+            except (TypeError, ValueError):
+                payload["signalPercent"] = payload["signalLevel"]
+        payload.pop("signalLevel", None)
+        normalized["payload"] = payload
+        return normalized
+
+    def _is_duplicate_device_event(
+        self,
+        event_data: dict,
+        window_seconds: float = 2.0,
+    ) -> bool:
+        if event_data.get("eventType") != "HEARTBEAT":
+            return False
+
+        payload = event_data.get("payload") or {}
+        key = (
+            event_data.get("deviceNo"),
+            event_data.get("eventType"),
+            payload.get("batteryLevel"),
+            payload.get("signalPercent"),
+        )
+        if not key[0]:
+            return False
+
+        now = time.time()
+        self._recent_device_event_keys = {
+            cached_key: cached_time
+            for cached_key, cached_time in self._recent_device_event_keys.items()
+            if now - cached_time <= window_seconds
+        }
+
+        last_seen = self._recent_device_event_keys.get(key)
+        if last_seen is not None and now - last_seen <= window_seconds:
+            return True
+
+        self._recent_device_event_keys[key] = now
         return False
 
     # ==================== 业务便捷方法 ====================

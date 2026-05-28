@@ -30,8 +30,6 @@ from config import (
     GATEWAY_FIRMWARE_VERSION,
     GATEWAY_MANAGED_DEVICE_COUNT,
     GATEWAY_NAME,
-    GATEWAY_REGION,
-    GATEWAY_ROLE,
     KNOWLEDGE_BASE_INTERNAL_PATH,
     ConfigType,
 )
@@ -130,6 +128,7 @@ async def get_nodes_status():
     }
 
 
+@router.get("/badge/v1/gateway/device-status")
 @router.get("/badge/v1/algorithm/device-status")
 async def get_gateway_device_status():
     """
@@ -138,6 +137,7 @@ async def get_gateway_device_status():
     返回网关名称、角色/区域、当前在线硬件数量、在线率和固件版本。
     在线硬件数量来自 WebSocketDeviceManager，即当前开机并连接网关的设备数。
     """
+    await ws_device_manager.prune_stale_devices()
     online_devices = ws_device_manager.get_online_devices()
     online_count = len(online_devices)
     total_count = GATEWAY_MANAGED_DEVICE_COUNT if GATEWAY_MANAGED_DEVICE_COUNT > 0 else online_count
@@ -148,11 +148,7 @@ async def get_gateway_device_status():
         "msg": "ok",
         "data": {
             "gatewayName": GATEWAY_NAME,
-            "gatewayRole": GATEWAY_ROLE,
-            "gatewayRegion": GATEWAY_REGION,
             "connectedDeviceCount": online_count,
-            "managedDeviceCount": total_count,
-            "onlineRate": online_rate,
             "onlineRateText": f"{online_rate:.1f}%",
             "firmwareVersion": GATEWAY_FIRMWARE_VERSION,
             "onlineDevices": online_devices,

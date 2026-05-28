@@ -100,13 +100,26 @@ class HeartbeatPayload(BaseModel):
         description="电量百分比，0-100的整数",
         examples=[86],
     )
-    signalLevel: int = Field(
-        ...,
+    signalLevel: Optional[int] = Field(
+        None,
         ge=SIGNAL_LEVEL_MIN,
         le=SIGNAL_LEVEL_MAX,
         description="信号等级，0-5的整数（0=无信号，5=满格）",
         examples=[4],
     )
+    signalPercent: Optional[int] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="信号百分比，0-100的整数",
+        examples=[80],
+    )
+
+    @model_validator(mode="after")
+    def validate_signal_field(self) -> "HeartbeatPayload":
+        if self.signalLevel is None and self.signalPercent is None:
+            raise ValueError("HEARTBEAT事件payload必须包含signalPercent或signalLevel")
+        return self
 
 
 class AlarmPayload(BaseModel):
@@ -392,9 +405,13 @@ async def receive_device_event(request: DeviceEventRequest):
     # 2. 转发到后端的数据将signalLevel转换为signalPercent（百分比0-100，signalLevel * 20）
     # 3. 此转换仅在eventType=HEARTBEAT时执行
     forward_data = raw_data.copy()
+    forward_data["reportTime"] = _format_current_time()
     if event_type == EventType.HEARTBEAT and "payload" in forward_data:
         payload = forward_data["payload"].copy()
-        if "signalLevel" in payload:
+        if "signalPercent" in payload:
+            payload.pop("signalLevel", None)
+            forward_data["payload"] = payload
+        elif "signalLevel" in payload:
             signal_level = payload.pop("signalLevel")
             signal_percent = signal_level * 20
             payload["signalPercent"] = signal_percent

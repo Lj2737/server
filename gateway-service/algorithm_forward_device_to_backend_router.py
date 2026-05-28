@@ -69,8 +69,10 @@ class AlgorithmDeviceEventRequest(BaseModel):
     @model_validator(mode="after")
     def validate_payload(self) -> "AlgorithmDeviceEventRequest":
         if self.eventType == "HEARTBEAT":
-            if "batteryLevel" not in self.payload or "signalPercent" not in self.payload:
-                raise ValueError("HEARTBEAT payload必须包含batteryLevel和signalPercent")
+            if "batteryLevel" not in self.payload or (
+                "signalPercent" not in self.payload and "signalLevel" not in self.payload
+            ):
+                raise ValueError("HEARTBEAT payload必须包含batteryLevel和signalPercent或signalLevel")
         if self.eventType == "ALARM":
             if "alarmCode" not in self.payload or "alarmStatus" not in self.payload:
                 raise ValueError("ALARM payload必须包含alarmCode和alarmStatus")
