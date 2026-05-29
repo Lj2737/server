@@ -285,6 +285,14 @@ async def device_websocket(websocket: WebSocket, device_no: str):
             try:
                 # 接收客户端消息
                 data = await websocket.receive()
+                if not ws_device_manager.is_device_online(device_no):
+                    logger.warning(
+                        f"Device WebSocket activity restored after offline pruning | "
+                        f"deviceNo={device_no}"
+                    )
+                    await ws_device_manager.register_device(device_no, websocket)
+                else:
+                    ws_device_manager.record_device_activity(device_no)
 
                 # 处理不同类型的消息
                 if "text" in data:
@@ -339,7 +347,7 @@ async def device_websocket(websocket: WebSocket, device_no: str):
     finally:
         # 步骤4：注销设备
         await _cancel_active_dialog(device_no, reason="websocket_disconnect")
-        await ws_device_manager.unregister_device(device_no)
+        await ws_device_manager.unregister_device(device_no, websocket=websocket)
 
 
 async def _handle_device_message(device_no: str, websocket: WebSocket, text: str) -> None:

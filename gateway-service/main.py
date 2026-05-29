@@ -255,8 +255,6 @@ app = FastAPI(
     title="智能胸牌服务管理系统 - 主网关节点",
     description=(
         "算法侧网关服务，负责请求路由、负载均衡、结果汇总。"
-        "部署架构：1台主树莓派（网关） + 4台从树莓派（算力）\n"
-        "v3.2：算力节点调用LLM API诊断 + TTS API播报 + 异常录音合并到voice-behaviors"
     ),
     version="3.2.0",
     lifespan=lifespan,

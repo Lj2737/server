@@ -42,6 +42,10 @@ class _DeviceConnection:
         self.last_pong_time = time.time()
         self.missed_pings = 0
 
+    def record_activity(self) -> None:
+        self.last_pong_time = time.time()
+        self.missed_pings = 0
+
     def increment_missed_ping(self) -> int:
         self.missed_pings += 1
         return self.missed_pings
@@ -94,15 +98,24 @@ class WebSocketDeviceManager:
             f"onlineCount={len(self._connections)}"
         )
 
-    async def unregister_device(self, device_no: str) -> None:
+    async def unregister_device(self, device_no: str, websocket: Optional[WebSocket] = None) -> None:
         """Remove a device WebSocket connection from the online map."""
-        if device_no in self._connections:
-            del self._connections[device_no]
-            self._streaming_devices.discard(device_no)
+        conn = self._connections.get(device_no)
+        if conn is None:
+            return
+        if websocket is not None and conn.websocket is not websocket:
             logger.info(
-                f"Device WebSocket unregistered | deviceNo={device_no} | "
+                f"Skip unregister for stale WebSocket | deviceNo={device_no} | "
                 f"onlineCount={len(self._connections)}"
             )
+            return
+
+        del self._connections[device_no]
+        self._streaming_devices.discard(device_no)
+        logger.info(
+            f"Device WebSocket unregistered | deviceNo={device_no} | "
+            f"onlineCount={len(self._connections)}"
+        )
 
     @staticmethod
     async def _pace_audio_chunk(chunk_size: int) -> None:
@@ -125,7 +138,7 @@ class WebSocketDeviceManager:
             await conn.websocket.send_text(json.dumps(message, ensure_ascii=False))
             return True
         except WebSocketDisconnect:
-            await self.unregister_device(device_no)
+            await self.unregister_device(device_no, websocket=conn.websocket)
             return False
         except Exception as exc:
             logger.error(
@@ -177,8 +190,14 @@ class WebSocketDeviceManager:
                 f"AI dialog audio push interrupted; device disconnected | "
                 f"deviceNo={device_no} | dialogId={dialog_id}"
             )
-            await self.unregister_device(device_no)
+            await self.unregister_device(device_no, websocket=conn.websocket)
             return False
+        except asyncio.CancelledError:
+            logger.info(
+                f"AI dialog audio push cancelled | deviceNo={device_no} | "
+                f"dialogId={dialog_id} | chunks={chunk_count} | bytes={total_bytes}"
+            )
+            raise
         except Exception as exc:
             error_detail = str(exc)[:1200]
             logger.error(
@@ -242,7 +261,7 @@ class WebSocketDeviceManager:
             return True
         except WebSocketDisconnect:
             logger.warning(f"Broadcast audio push interrupted; device disconnected | deviceNo={device_no}")
-            await self.unregister_device(device_no)
+            await self.unregister_device(device_no, websocket=conn.websocket)
             return False
         except Exception as exc:
             logger.error(
@@ -273,6 +292,27 @@ class WebSocketDeviceManager:
 
     def get_online_count(self) -> int:
         return len(self._connections)
+
+    def record_device_activity(self, device_no: str) -> None:
+        conn = self._connections.get(device_no)
+        if conn is not None:
+            conn.record_activity()
+
+    async def prune_stale_devices(self) -> None:
+        stale_after = WS_HEARTBEAT_INTERVAL + WS_PING_TIMEOUT * WS_HEARTBEAT_FAIL_THRESHOLD
+        now = time.time()
+        stale_devices = [
+            device_no
+            for device_no, conn in list(self._connections.items())
+            if device_no not in self._streaming_devices and now - conn.last_pong_time > stale_after
+        ]
+        for device_no in stale_devices:
+            logger.warning(
+                f"Pruning stale WebSocket device before status response | "
+                f"deviceNo={device_no} | staleAfter={stale_after:.1f}s"
+            )
+            conn = self._connections.get(device_no)
+            await self.unregister_device(device_no, websocket=conn.websocket if conn else None)
 
     async def start_heartbeat(self) -> None:
         """Start the background text-frame heartbeat loop."""
@@ -316,8 +356,9 @@ class WebSocketDeviceManager:
                         await conn.websocket.send_text(json.dumps({"type": "ping"}, ensure_ascii=False))
                         logger.debug(f"WebSocket ping sent | deviceNo={device_no}")
 
+                        await asyncio.sleep(0)
                         time_since_last = time.time() - conn.last_pong_time
-                        if time_since_last > WS_HEARTBEAT_INTERVAL * 2:
+                        if time_since_last > WS_HEARTBEAT_INTERVAL + WS_PING_TIMEOUT:
                             missed = conn.increment_missed_ping()
                             logger.debug(
                                 f"WebSocket heartbeat missed | deviceNo={device_no} | "
@@ -341,7 +382,8 @@ class WebSocketDeviceManager:
                         f"WebSocket heartbeat timeout; unregistering device | "
                         f"deviceNo={device_no} | missed={WS_HEARTBEAT_FAIL_THRESHOLD}"
                     )
-                    await self.unregister_device(device_no)
+                    conn = self._connections.get(device_no)
+                    await self.unregister_device(device_no, websocket=conn.websocket if conn else None)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
