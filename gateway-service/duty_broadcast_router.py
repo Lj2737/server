@@ -105,7 +105,17 @@ _dialog_sessions: Dict[str, Dict[str, Any]] = {}
 _dialog_tasks: Dict[str, asyncio.Task] = {}
 _dialog_task_dialog_ids: Dict[str, str] = {}
 _dialog_versions: Dict[str, int] = {}
+_dialog_locks: Dict[str, asyncio.Lock] = {}
 _DIALOG_INTERRUPT_WAIT_SECONDS = 1.0
+_DIALOG_START_DEBOUNCE_SECONDS = 0.35
+
+
+def _get_dialog_lock(device_no: str) -> asyncio.Lock:
+    lock = _dialog_locks.get(device_no)
+    if lock is None:
+        lock = asyncio.Lock()
+        _dialog_locks[device_no] = lock
+    return lock
 
 
 def initialize_ai_dialog(backend_client: BackendClient) -> None:
@@ -246,6 +256,11 @@ async def _cancel_active_dialog(device_no: str, reason: str) -> Optional[str]:
     return interrupted_dialog_id
 
 
+async def _cancel_active_dialog_locked(device_no: str, reason: str) -> Optional[str]:
+    async with _get_dialog_lock(device_no):
+        return await _cancel_active_dialog(device_no, reason)
+
+
 # ==================== WebSocket端点：胸牌设备连接 ====================
 
 @ws_router.websocket("/ws/device/{device_no}")
@@ -346,7 +361,8 @@ async def device_websocket(websocket: WebSocket, device_no: str):
 
     finally:
         # 步骤4：注销设备
-        await _cancel_active_dialog(device_no, reason="websocket_disconnect")
+        if ws_device_manager.get_device_websocket(device_no) is websocket:
+            await _cancel_active_dialog_locked(device_no, reason="websocket_disconnect")
         await ws_device_manager.unregister_device(device_no, websocket=websocket)
 
 
@@ -371,15 +387,38 @@ async def _handle_device_message(device_no: str, websocket: WebSocket, text: str
                 await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": False, "message": "deviceNo does not match websocket path"})
                 return
 
-            interrupted_dialog_id = await _cancel_active_dialog(device_no, reason="new_dialog_start")
-            session_version = _next_dialog_version(device_no)
-            _dialog_sessions[device_no] = {
-                "dialog_id": dialog_id,
-                "version": session_version,
-                "chunks": [],
-                "total_bytes": 0,
-                "started_at": time.time(),
-            }
+            now = time.time()
+            async with _get_dialog_lock(device_no):
+                active_session = _dialog_sessions.get(device_no)
+                if active_session is not None:
+                    active_dialog_id = str(active_session.get("dialog_id", ""))
+                    active_started_at = float(active_session.get("started_at") or 0)
+                    if now - active_started_at < _DIALOG_START_DEBOUNCE_SECONDS:
+                        await ws_device_manager.send_text(
+                            device_no,
+                            {
+                                "type": "dialog_start_ack",
+                                "dialogId": dialog_id,
+                                "success": False,
+                                "message": "dialog_start too frequent",
+                                "activeDialogId": active_dialog_id,
+                            },
+                        )
+                        logger.warning(
+                            f"AI dialog start rejected by debounce | deviceNo={device_no} | "
+                            f"dialogId={dialog_id} | activeDialogId={active_dialog_id}"
+                        )
+                        return
+
+                interrupted_dialog_id = await _cancel_active_dialog(device_no, reason="new_dialog_start")
+                session_version = _next_dialog_version(device_no)
+                _dialog_sessions[device_no] = {
+                    "dialog_id": dialog_id,
+                    "version": session_version,
+                    "chunks": [],
+                    "total_bytes": 0,
+                    "started_at": now,
+                }
             await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": True})
             logger.info(
                 f"AI dialog started | deviceNo={device_no} | dialogId={dialog_id} | "
@@ -389,29 +428,32 @@ async def _handle_device_message(device_no: str, websocket: WebSocket, text: str
 
         if msg_type == "dialog_end":
             dialog_id = str(msg.get("dialogId", "")).strip()
-            session = _dialog_sessions.pop(device_no, None)
-            if not session:
-                await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "dialog session not found"})
-                return
-            if dialog_id and dialog_id != session.get("dialog_id"):
-                await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "dialogId does not match active session"})
-                return
+            async with _get_dialog_lock(device_no):
+                session = _dialog_sessions.pop(device_no, None)
+                if not session:
+                    await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "dialog session not found"})
+                    return
+                if dialog_id and dialog_id != session.get("dialog_id"):
+                    _dialog_sessions[device_no] = session
+                    await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": dialog_id, "message": "dialogId does not match active session"})
+                    return
 
             pcm_bytes = b"".join(session["chunks"])
             if not pcm_bytes:
                 await ws_device_manager.send_text(device_no, {"type": "dialog_error", "dialogId": session["dialog_id"], "message": "dialog audio is empty"})
                 return
 
-            task = asyncio.create_task(
-                _handle_ai_dialog_task(
-                    device_no=device_no,
-                    dialog_id=session["dialog_id"],
-                    version=int(session.get("version", 0)),
-                    pcm_bytes=pcm_bytes,
-                ),
-                name=f"ai-dialog-{device_no}-{session['dialog_id']}",
-            )
-            _track_dialog_task(device_no, session["dialog_id"], task)
+            async with _get_dialog_lock(device_no):
+                task = asyncio.create_task(
+                    _handle_ai_dialog_task(
+                        device_no=device_no,
+                        dialog_id=session["dialog_id"],
+                        version=int(session.get("version", 0)),
+                        pcm_bytes=pcm_bytes,
+                    ),
+                    name=f"ai-dialog-{device_no}-{session['dialog_id']}",
+                )
+                _track_dialog_task(device_no, session["dialog_id"], task)
             logger.info(f"AI dialog audio accepted | deviceNo={device_no} | dialogId={session['dialog_id']} | bytes={len(pcm_bytes)}")
             return
 

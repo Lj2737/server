@@ -34,6 +34,7 @@ class _DeviceConnection:
     def __init__(self, device_no: str, websocket: WebSocket):
         self.device_no = device_no
         self.websocket = websocket
+        self.send_lock = asyncio.Lock()
         self.connected_at = time.time()
         self.last_pong_time = time.time()
         self.missed_pings = 0
@@ -135,7 +136,14 @@ class WebSocketDeviceManager:
             return False
 
         try:
-            await conn.websocket.send_text(json.dumps(message, ensure_ascii=False))
+            async with conn.send_lock:
+                if self._connections.get(device_no) is not conn:
+                    logger.warning(
+                        f"Device text send skipped; stale connection | deviceNo={device_no} | "
+                        f"type={message.get('type')}"
+                    )
+                    return False
+                await conn.websocket.send_text(json.dumps(message, ensure_ascii=False))
             return True
         except WebSocketDisconnect:
             await self.unregister_device(device_no, websocket=conn.websocket)
@@ -164,21 +172,29 @@ class WebSocketDeviceManager:
         start_time = time.time()
         self._streaming_devices.add(device_no)
         try:
-            async for pcm_chunk in audio_stream:
-                await conn.websocket.send_bytes(pcm_chunk)
-                total_bytes += len(pcm_chunk)
-                chunk_count += 1
-                await self._pace_audio_chunk(len(pcm_chunk))
+            async with conn.send_lock:
+                if self._connections.get(device_no) is not conn:
+                    logger.warning(
+                        f"AI dialog audio push skipped; stale connection | "
+                        f"deviceNo={device_no} | dialogId={dialog_id}"
+                    )
+                    return False
 
-            await conn.websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "dialog_end_ack",
-                        "dialogId": dialog_id,
-                    },
-                    ensure_ascii=False,
+                async for pcm_chunk in audio_stream:
+                    await conn.websocket.send_bytes(pcm_chunk)
+                    total_bytes += len(pcm_chunk)
+                    chunk_count += 1
+                    await self._pace_audio_chunk(len(pcm_chunk))
+
+                await conn.websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "dialog_end_ack",
+                            "dialogId": dialog_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 )
-            )
             elapsed_ms = int((time.time() - start_time) * 1000)
             logger.info(
                 f"AI dialog audio pushed | deviceNo={device_no} | dialogId={dialog_id} | "
@@ -234,23 +250,28 @@ class WebSocketDeviceManager:
         self._streaming_devices.add(device_no)
 
         try:
-            await conn.websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "broadcast_start",
-                        "content": broadcast_content,
-                    },
-                    ensure_ascii=False,
+            async with conn.send_lock:
+                if self._connections.get(device_no) is not conn:
+                    logger.warning(f"Broadcast audio push skipped; stale connection | deviceNo={device_no}")
+                    return False
+
+                await conn.websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "broadcast_start",
+                            "content": broadcast_content,
+                        },
+                        ensure_ascii=False,
+                    )
                 )
-            )
 
-            async for pcm_chunk in audio_stream:
-                await conn.websocket.send_bytes(pcm_chunk)
-                total_bytes += len(pcm_chunk)
-                chunk_count += 1
-                await self._pace_audio_chunk(len(pcm_chunk))
+                async for pcm_chunk in audio_stream:
+                    await conn.websocket.send_bytes(pcm_chunk)
+                    total_bytes += len(pcm_chunk)
+                    chunk_count += 1
+                    await self._pace_audio_chunk(len(pcm_chunk))
 
-            await conn.websocket.send_text(json.dumps({"type": "broadcast_end"}, ensure_ascii=False))
+                await conn.websocket.send_text(json.dumps({"type": "broadcast_end"}, ensure_ascii=False))
 
             elapsed_ms = int((time.time() - start_time) * 1000)
             audio_duration = total_bytes / (2 * 16000) if total_bytes > 0 else 0
@@ -286,6 +307,10 @@ class WebSocketDeviceManager:
 
     def is_device_online(self, device_no: str) -> bool:
         return device_no in self._connections
+
+    def get_device_websocket(self, device_no: str) -> Optional[WebSocket]:
+        conn = self._connections.get(device_no)
+        return conn.websocket if conn is not None else None
 
     def get_online_devices(self) -> list:
         return list(self._connections.keys())
@@ -353,7 +378,10 @@ class WebSocketDeviceManager:
                         conn.record_pong()
                         continue
                     try:
-                        await conn.websocket.send_text(json.dumps({"type": "ping"}, ensure_ascii=False))
+                        async with conn.send_lock:
+                            if self._connections.get(device_no) is not conn:
+                                continue
+                            await conn.websocket.send_text(json.dumps({"type": "ping"}, ensure_ascii=False))
                         logger.debug(f"WebSocket ping sent | deviceNo={device_no}")
 
                         await asyncio.sleep(0)
