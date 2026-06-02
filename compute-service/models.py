@@ -223,7 +223,44 @@ class ASRModel:
         except Exception as e:
             raise RuntimeError(f"ASR推理异常: {str(e)}")
 
+    async def inference_with_timestamps(self, audio_bytes: bytes) -> Dict[str, Any]:
+        """
+        ASR推理并返回可选token时间戳。
+        保持原inference()返回字符串不变，行为识别链路可用此方法提升异常音频裁剪精度。
+        """
+        if not self._is_loaded:
+            raise RuntimeError("ASR模型未加载，无法执行推理")
+
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(self._inference_sync_result, audio_bytes),
+                timeout=ASR_TIMEOUT,
+            )
+
+            result_text = str(result.get("text") or "").strip()
+            if not result_text:
+                raise RuntimeError("ASR推理输出为空")
+
+            logger.info(
+                f"ASR推理完成 | 输出文本长度={len(result_text)} | "
+                f"tokens={len(result.get('tokens') or [])} | "
+                f"timestamps={len(result.get('timestamps') or [])} | "
+                f"文本预览={result_text[:50]}..."
+            )
+            return result
+
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"ASR推理超时（{ASR_TIMEOUT}秒）")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"ASR推理异常: {str(e)}")
+
     def _inference_sync(self, audio_bytes: bytes) -> str:
+        result = self._inference_sync_result(audio_bytes)
+        return result["text"]
+
+    def _inference_sync_result(self, audio_bytes: bytes) -> Dict[str, Any]:
         """
         同步ASR推理（在子线程中执行）
         将WAV字节流转为采样数据，送入sense-voice模型推理
@@ -246,7 +283,21 @@ class ASRModel:
         self._recognizer.decode_stream(stream)
 
         # 获取识别结果
-        return stream.result.text
+        result = stream.result
+        return {
+            "text": str(getattr(result, "text", "") or ""),
+            "tokens": self._safe_list(getattr(result, "tokens", None)),
+            "timestamps": self._safe_list(getattr(result, "timestamps", None)),
+        }
+
+    @staticmethod
+    def _safe_list(value: Any) -> List[Any]:
+        if value is None:
+            return []
+        try:
+            return list(value)
+        except TypeError:
+            return []
 
     def release(self) -> None:
         """释放ASR模型资源"""

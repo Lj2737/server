@@ -10,7 +10,8 @@ import wave
 import io
 import base64
 import struct
-from typing import Tuple, Optional
+import re
+from typing import Tuple, Optional, List, Any
 
 from loguru import logger
 
@@ -234,6 +235,8 @@ def clip_abnormal_audio(
     audio_bytes: bytes,
     asr_text: str = "",
     keyword_content: str = "",
+    asr_tokens: Optional[List[Any]] = None,
+    asr_timestamps: Optional[List[Any]] = None,
 ) -> str:
     """
     裁剪异常行为音频片段
@@ -255,10 +258,12 @@ def clip_abnormal_audio(
             total_frames = wf.getnframes()
             total_duration = total_frames / frame_rate
 
-            trigger_seconds = _estimate_trigger_seconds(
+            trigger_seconds, trigger_method = _estimate_trigger_seconds(
                 total_duration=total_duration,
                 asr_text=asr_text,
                 keyword_content=keyword_content,
+                asr_tokens=asr_tokens,
+                asr_timestamps=asr_timestamps,
             )
 
             if total_duration <= ABNORMAL_CLIP_TOTAL_SECONDS:
@@ -284,7 +289,8 @@ def clip_abnormal_audio(
                 read_frames = max(0, end_frame - start_frame)
                 logger.debug(
                     f"异常音频按关键词位置裁剪 | keyword={keyword_content} | "
-                    f"trigger={trigger_seconds:.2f}s | start={start_seconds:.2f}s | "
+                    f"method={trigger_method} | trigger={trigger_seconds:.2f}s | "
+                    f"start={start_seconds:.2f}s | "
                     f"end={end_seconds:.2f}s | 起始帧={start_frame} | "
                     f"裁剪帧数={read_frames} | 音频时长={total_duration:.2f}s"
                 )
@@ -330,20 +336,98 @@ def _estimate_trigger_seconds(
     total_duration: float,
     asr_text: str = "",
     keyword_content: str = "",
-) -> float:
+    asr_tokens: Optional[List[Any]] = None,
+    asr_timestamps: Optional[List[Any]] = None,
+) -> Tuple[float, str]:
+    timestamp_trigger = _estimate_trigger_seconds_from_timestamps(
+        total_duration=total_duration,
+        keyword_content=keyword_content,
+        asr_tokens=asr_tokens,
+        asr_timestamps=asr_timestamps,
+    )
+    if timestamp_trigger is not None:
+        return timestamp_trigger, "timestamp"
+
     source_text = (asr_text or "").strip()
     keyword = (keyword_content or "").strip()
     if not source_text or not keyword:
-        return total_duration
+        return total_duration, "fallback_end_missing_text_or_keyword"
 
     keyword_index = source_text.find(keyword)
     if keyword_index < 0:
-        return total_duration
+        return total_duration, "fallback_end_keyword_not_found"
 
     midpoint = keyword_index + len(keyword) / 2
     ratio = midpoint / max(len(source_text), 1)
     ratio = max(0.0, min(1.0, ratio))
-    return total_duration * ratio
+    return total_duration * ratio, "text_ratio"
+
+
+def _estimate_trigger_seconds_from_timestamps(
+    total_duration: float,
+    keyword_content: str = "",
+    asr_tokens: Optional[List[Any]] = None,
+    asr_timestamps: Optional[List[Any]] = None,
+) -> Optional[float]:
+    keyword = _normalize_alignment_text(keyword_content)
+    if not keyword or not asr_tokens or not asr_timestamps:
+        return None
+
+    token_count = min(len(asr_tokens), len(asr_timestamps))
+    if token_count <= 0:
+        return None
+
+    normalized_parts: List[str] = []
+    token_indexes: List[int] = []
+    for index in range(token_count):
+        token_text = _normalize_alignment_text(asr_tokens[index])
+        if not token_text:
+            continue
+        normalized_parts.append(token_text)
+        token_indexes.extend([index] * len(token_text))
+
+    normalized_text = "".join(normalized_parts)
+    if not normalized_text:
+        return None
+
+    keyword_index = normalized_text.find(keyword)
+    if keyword_index < 0:
+        return None
+
+    start_char_index = keyword_index
+    end_char_index = keyword_index + len(keyword) - 1
+    if end_char_index >= len(token_indexes):
+        return None
+
+    start_token_index = token_indexes[start_char_index]
+    end_token_index = token_indexes[end_char_index]
+
+    start_seconds = _safe_timestamp(asr_timestamps[start_token_index])
+    end_seconds = _safe_timestamp(asr_timestamps[end_token_index])
+    if start_seconds is None or end_seconds is None:
+        return None
+
+    if end_seconds < start_seconds:
+        start_seconds, end_seconds = end_seconds, start_seconds
+
+    trigger_seconds = (start_seconds + end_seconds) / 2
+    return max(0.0, min(total_duration, trigger_seconds))
+
+
+def _normalize_alignment_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"<\|[^>]+\|>", "", text)
+    text = re.sub(r"[\s，。！？、,.!?;；:：\"'“”‘’（）()\[\]{}<>《》【】\-_/\\|]+", "", text)
+    return text
+
+
+def _safe_timestamp(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def get_audio_duration(audio_bytes: bytes) -> float:

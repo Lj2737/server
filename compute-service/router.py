@@ -471,7 +471,10 @@ async def behavior_recognition(
             )
 
             try:
-                asr_text = await asr_model.inference(audio_bytes)
+                asr_result = await asr_model.inference_with_timestamps(audio_bytes)
+                asr_text = str(asr_result.get("text") or "").strip()
+                asr_tokens = asr_result.get("tokens") or []
+                asr_timestamps = asr_result.get("timestamps") or []
             except RuntimeError as e:
                 logger.error(
                     f"ASR推理失败 | request_id={request_id} | 错误={e}"
@@ -623,6 +626,8 @@ async def behavior_recognition(
                     audio_bytes,
                     asr_text=asr_text,
                     keyword_content=keyword_content,
+                    asr_tokens=asr_tokens,
+                    asr_timestamps=asr_timestamps,
                 )
                 if not abnormal_audio_clip:
                     logger.warning(f"异常音频裁剪失败，不返回音频片段 | request_id={request_id}")
