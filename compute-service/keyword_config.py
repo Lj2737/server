@@ -216,7 +216,8 @@ class KeywordConfigManager:
         }
 
         matches: List[Dict[str, str]] = []
-        seen = set()
+        seen_config_keywords = set()
+        seen_keyword_contents = set()
         for current_group_key in group_keys:
             for config_item in self._keyword_groups.get(current_group_key, []):
                 config_item_id = str(config_item.get("configItemId", "")).strip()
@@ -227,11 +228,23 @@ class KeywordConfigManager:
                     content = str(keyword.get("content", "")).strip()
                     if not content or content.lower() not in normalized_source:
                         continue
-                    keyword_id = str(keyword.get("id", "")).strip()
-                    dedupe_key = (current_group_key, config_item_id, keyword_id, content)
-                    if dedupe_key in seen:
+                    normalized_content = "".join(content.lower().split())
+                    if not normalized_content:
                         continue
-                    seen.add(dedupe_key)
+                    config_keyword_key = (
+                        current_group_key,
+                        config_item_id,
+                        normalized_content,
+                    )
+                    if config_keyword_key in seen_config_keywords:
+                        continue
+                    seen_config_keywords.add(config_keyword_key)
+
+                    if normalized_content in seen_keyword_contents:
+                        continue
+                    seen_keyword_contents.add(normalized_content)
+
+                    keyword_id = str(keyword.get("id", "")).strip()
                     matches.append(
                         {
                             "config_group": current_group_key,

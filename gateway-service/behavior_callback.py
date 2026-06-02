@@ -153,17 +153,20 @@ class BehaviorCallback:
 
         keyword_matches = self._normalize_keyword_matches(inference_data)
         if len(keyword_matches) > 1 and not inference_data.get("_skip_keyword_match_grouping"):
-            grouped_matches = self._group_keyword_matches_by_type(keyword_matches)
+            grouped_matches = self._group_keyword_matches_by_config_item(keyword_matches)
             logger.info(
-                f"行为识别命中多个关键词，按类型分组回调 | deviceNo={device_no} | "
+                f"行为识别命中多个关键词，按配置项分组回调 | deviceNo={device_no} | "
                 f"total={len(keyword_matches)} | groups={list(grouped_matches.keys())}"
             )
-            for grouped_behavior_type, grouped_items in grouped_matches.items():
+            for _, grouped_items in grouped_matches.items():
                 if not grouped_items:
                     continue
                 per_group_data = dict(inference_data)
                 per_group_data["_skip_keyword_match_grouping"] = True
-                per_group_data["behavior_type"] = grouped_behavior_type
+                per_group_data["behavior_type"] = grouped_items[0].get(
+                    "behavior_type",
+                    inference_data.get("behavior_type", BehaviorType.STANDARD),
+                )
                 config_item_id = grouped_items[0]["config_item_id"]
                 keyword_content = self._join_unique_values(
                     item["keyword_content"] for item in grouped_items
@@ -401,13 +404,16 @@ class BehaviorCallback:
         return normalized
 
     @staticmethod
-    def _group_keyword_matches_by_type(keyword_matches: list) -> Dict[str, list]:
+    def _group_keyword_matches_by_config_item(keyword_matches: list) -> Dict[str, list]:
         grouped: Dict[str, list] = {}
         for match in keyword_matches:
             behavior_type = BehaviorCallback._validate_behavior_type(
                 match.get("behavior_type", BehaviorType.STANDARD)
             )
-            grouped.setdefault(behavior_type, []).append(match)
+            config_item_id = BehaviorCallback._first_non_empty(match.get("config_item_id"))
+            if not config_item_id:
+                continue
+            grouped.setdefault(f"{behavior_type}:{config_item_id}", []).append(match)
         return grouped
 
     @staticmethod
