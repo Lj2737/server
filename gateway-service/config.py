@@ -206,6 +206,10 @@ DIAGNOSIS_INTERNAL_PATH: str = _env_str(
     "DIAGNOSIS_INTERNAL_PATH",
     "/badge/v1/internal/algorithm/inference/diagnosis-summary",
 )
+STORE_DIAGNOSIS_INTERNAL_PATH: str = _env_str(
+    "STORE_DIAGNOSIS_INTERNAL_PATH",
+    "/badge/v1/internal/algorithm/inference/store-diagnosis-summary",
+)
 DIAGNOSIS_REQUEST_TIMEOUT: float = _env_float("DIAGNOSIS_REQUEST_TIMEOUT", 60.0)
 
 

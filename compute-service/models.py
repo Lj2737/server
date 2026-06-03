@@ -40,6 +40,8 @@ from config import (
     BEHAVIOR_USER_PROMPT_TEMPLATE,
     DIAGNOSIS_SYSTEM_PROMPT,
     DIAGNOSIS_USER_PROMPT_TEMPLATE,
+    STORE_DIAGNOSIS_SYSTEM_PROMPT,
+    STORE_DIAGNOSIS_USER_PROMPT_TEMPLATE,
     BehaviorType,
     DimensionType,
 )
@@ -479,6 +481,40 @@ class LLMModel:
             stop=DIAGNOSIS_LLM_STOP,
             max_retries=DIAGNOSIS_LLM_MAX_RETRIES,
             valid_keys=["summary", "dimensions"],
+        )
+
+    async def store_diagnosis_inference(
+        self,
+        store_id: str,
+        store_name: str,
+        start_date: str,
+        end_date: str,
+        behaviors: list,
+    ) -> Dict[str, Any]:
+        """
+        门店诊断总结LLM推理
+        - 构造门店诊断专用system_prompt和user_prompt
+        - JSON输出校验，失败自动重试
+        """
+        if not self._is_loaded or self._client is None:
+            raise RuntimeError("LLM API客户端未初始化，无法执行推理")
+
+        user_prompt = STORE_DIAGNOSIS_USER_PROMPT_TEMPLATE.format(
+            store_id=store_id,
+            store_name=store_name,
+            start_date=start_date,
+            end_date=end_date,
+            behaviors=json.dumps(behaviors, ensure_ascii=False),
+        )
+
+        return await self._inference_with_retry(
+            system_prompt=STORE_DIAGNOSIS_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=DIAGNOSIS_LLM_TEMPERATURE,
+            max_tokens=DIAGNOSIS_LLM_MAX_TOKENS,
+            stop=DIAGNOSIS_LLM_STOP,
+            max_retries=DIAGNOSIS_LLM_MAX_RETRIES,
+            valid_keys=["summary", "suggestions"],
         )
 
     async def _inference_with_retry(

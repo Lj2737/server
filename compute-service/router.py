@@ -34,6 +34,8 @@ from schemas import (
     DiagnosisSummaryResponse,
     DiagnosisResultData,
     DimensionItem,
+    StoreDiagnosisSummaryRequest,
+    StoreDiagnosisSummaryResponse,
     ConfigSyncRequest,
     ConfigSyncResponse,
     ConfigSyncResultData,
@@ -806,6 +808,120 @@ async def diagnosis_summary(body: DiagnosisSummaryRequest):
 
     finally:
         # 无论成功/失败，释放信号量和连接计数
+        _semaphore.release()
+        _decrement_connections()
+
+
+# ==================== 门店AI时段诊断总结推理接口 ====================
+
+@router.post(
+    "/badge/v1/internal/algorithm/inference/store-diagnosis-summary",
+    response_model=StoreDiagnosisSummaryResponse,
+)
+async def store_diagnosis_summary(body: StoreDiagnosisSummaryRequest):
+    """
+    门店AI时段诊断总结推理接口
+    根据门店员工行为记录生成门店综合分析和分析建议。
+    """
+    start_time = time.time()
+    request_id = body.request_id
+
+    idempotency_key = (
+        f"store-diagnosis:{body.store_id}:{body.start_date}:"
+        f"{body.end_date}:{request_id}"
+    )
+    cached_result = await idempotency_cache.get(idempotency_key)
+    if cached_result is not None:
+        logger.info(f"门店诊断幂等缓存命中 | request_id={request_id}")
+        return cached_result
+
+    acquired = await _try_acquire_semaphore(request_id)
+    if not acquired:
+        raise ComputeException(
+            code=ErrorCode.TOO_MANY_REQUESTS,
+            msg=ErrorMsg.TOO_MANY_REQUESTS,
+            request_id=request_id,
+        )
+
+    _increment_connections()
+
+    try:
+        try:
+            behaviors = [item.model_dump() for item in body.behaviors]
+            logger.info(
+                f"门店诊断LLM推理开始 | request_id={request_id} | "
+                f"store_id={body.store_id} | store_name={body.store_name} | "
+                f"时间范围={body.start_date}~{body.end_date} | 行为数={len(behaviors)}"
+            )
+
+            try:
+                llm_result = await llm_model.store_diagnosis_inference(
+                    store_id=body.store_id,
+                    store_name=body.store_name,
+                    start_date=body.start_date,
+                    end_date=body.end_date,
+                    behaviors=behaviors,
+                )
+            except RuntimeError as e:
+                logger.error(
+                    f"门店诊断LLM推理失败 | request_id={request_id} | 错误={e}"
+                )
+                raise ComputeException(
+                    code=ErrorCode.LLM_INFERENCE_FAILED,
+                    msg=f"{ErrorMsg.LLM_INFERENCE_FAILED}: {str(e)}",
+                    request_id=request_id,
+                )
+
+            summary = str(llm_result.get("summary") or "").strip()
+            if not summary:
+                summary = "该时间段暂无足够行为数据，暂无法形成明确门店诊断。"
+
+            raw_suggestions = llm_result.get("suggestions", [])
+            suggestions = []
+            if isinstance(raw_suggestions, list):
+                suggestions = [
+                    str(item).strip()
+                    for item in raw_suggestions
+                    if str(item).strip()
+                ]
+            elif isinstance(raw_suggestions, str) and raw_suggestions.strip():
+                suggestions = [raw_suggestions.strip()]
+            if not suggestions:
+                suggestions = ["暂无改进建议"]
+
+            result = {
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "summary": summary,
+                    "suggestions": suggestions,
+                },
+                "request_id": request_id,
+            }
+
+            await idempotency_cache.set(idempotency_key, result)
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                f"门店诊断总结完成 | request_id={request_id} | "
+                f"建议数={len(suggestions)} | 耗时={elapsed_ms}ms"
+            )
+
+            return result
+
+        except ComputeException:
+            raise
+        except Exception as e:
+            logger.exception(
+                f"门店诊断总结异常 | request_id={request_id} | 异常={e}"
+            )
+            raise ComputeException(
+                code=ErrorCode.INTERNAL_ERROR,
+                msg=ErrorMsg.INTERNAL_ERROR,
+                request_id=request_id,
+            )
+
+    finally:
         _semaphore.release()
         _decrement_connections()
 

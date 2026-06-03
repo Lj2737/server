@@ -18,7 +18,7 @@
 - 请求体字段名使用 camelCase，对齐v3文档后端→算法的接口规范
 """
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter
 from loguru import logger
@@ -177,6 +177,38 @@ class DiagnosisRequest(BaseModel):
     )
 
 
+class StoreBehaviorItem(BaseModel):
+    """门店诊断行为记录项"""
+    behaviorEventId: str = Field(..., min_length=1, description="行为事件ID")
+    behaviorType: Literal["STANDARD", "ABNORMAL", "CUSTOMER"] = Field(
+        ..., description="行为类型：STANDARD/ABNORMAL/CUSTOMER"
+    )
+    eventTime: str = Field(..., min_length=1, description="行为时间")
+    employeeId: str = Field(..., min_length=1, description="员工ID")
+    employeeName: str = Field(..., min_length=1, description="员工名称")
+    deviceNo: str = Field(..., min_length=1, description="设备编号")
+    configItemId: str = Field(..., min_length=1, description="命中的配置项ID")
+    configItemName: str = Field(..., min_length=1, description="命中的配置项名称")
+    keywordContent: str = Field(..., min_length=1, description="命中的关键词内容")
+    summary: str = Field(..., min_length=1, description="行为摘要")
+    reviewStatus: str = Field(..., min_length=1, description="复核状态")
+
+
+class StoreDiagnosisRequest(BaseModel):
+    """门店AI时段诊断总结请求体"""
+    storeId: str = Field(..., min_length=1, description="门店ID")
+    storeName: str = Field(..., min_length=1, description="门店名称")
+    startDate: str = Field(
+        ..., min_length=1, description="统计开始日期，格式yyyy-MM-dd"
+    )
+    endDate: str = Field(
+        ..., min_length=1, description="统计结束日期，格式yyyy-MM-dd"
+    )
+    behaviors: List[StoreBehaviorItem] = Field(
+        ..., description="门店员工行为记录列表，允许为空数组"
+    )
+
+
 class KeywordContentItem(BaseModel):
     """词库内容项"""
     id: str = Field(..., min_length=1, description="后端生成的词库内容ID")
@@ -308,6 +340,31 @@ async def diagnosis_summary(request: DiagnosisRequest):
     # 将Pydantic模型转为dict传给handler（递归展开嵌套模型）
     request_dict = request.model_dump()
     result = await diagnosis_handler.handle_diagnosis(
+        request_body=request_dict
+    )
+
+    return result
+
+
+# ==================== 功能3.2：门店AI时段诊断总结 ====================
+
+@backend_router.post("/stores/diagnosis-summary")
+async def store_diagnosis_summary(request: StoreDiagnosisRequest):
+    """
+    响应后端门店AI时段诊断总结调用
+    对齐交付物清单v3.5第6.2节。
+    """
+    request_id = str(uuid.uuid4())
+
+    logger.info(
+        f"收到门店AI诊断请求 | request_id={request_id} | "
+        f"门店={request.storeId}/{request.storeName} | "
+        f"时间范围={request.startDate} ~ {request.endDate} | "
+        f"行为数={len(request.behaviors)}"
+    )
+
+    request_dict = request.model_dump()
+    result = await diagnosis_handler.handle_store_diagnosis(
         request_body=request_dict
     )
 

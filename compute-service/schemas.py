@@ -7,7 +7,7 @@
 4. 响应模型约束输出格式，保证接口契约一致性
 """
 import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -108,6 +108,54 @@ class DiagnosisSummaryRequest(BaseModel):
         return v
 
 
+class StoreBehaviorItem(BaseModel):
+    """门店诊断行为记录项"""
+    behavior_event_id: str = Field(..., min_length=1, description="行为事件ID")
+    behavior_type: Literal["STANDARD", "ABNORMAL", "CUSTOMER"] = Field(
+        ..., description="行为类型：STANDARD/ABNORMAL/CUSTOMER"
+    )
+    event_time: str = Field(..., min_length=1, description="行为时间")
+    employee_id: str = Field(..., min_length=1, description="员工ID")
+    employee_name: str = Field(..., min_length=1, description="员工名称")
+    device_no: str = Field(..., min_length=1, description="设备编号")
+    config_item_id: str = Field(..., min_length=1, description="命中的配置项ID")
+    config_item_name: str = Field(..., min_length=1, description="命中的配置项名称")
+    keyword_content: str = Field(..., min_length=1, description="命中的关键词内容")
+    summary: str = Field(..., min_length=1, description="行为摘要")
+    review_status: str = Field(..., min_length=1, description="复核状态")
+
+
+class StoreDiagnosisSummaryRequest(BaseModel):
+    """门店AI时段诊断总结推理请求体"""
+    store_id: str = Field(..., min_length=1, description="门店ID")
+    store_name: str = Field(..., min_length=1, description="门店名称")
+    start_date: str = Field(..., min_length=1, description="开始日期，格式yyyy-MM-dd")
+    end_date: str = Field(..., min_length=1, description="结束日期，格式yyyy-MM-dd")
+    behaviors: List[StoreBehaviorItem] = Field(
+        ..., description="门店员工行为记录列表，允许为空数组"
+    )
+    request_id: str = Field(..., min_length=1, description="请求ID")
+
+    @field_validator("start_date", "end_date")
+    @classmethod
+    def validate_date_format(cls, v: str) -> str:
+        """校验日期格式必须为yyyy-MM-dd"""
+        try:
+            datetime.datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"日期格式错误，要求yyyy-MM-dd，实际={v}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_date_range(self) -> "StoreDiagnosisSummaryRequest":
+        """校验结束日期不能早于开始日期"""
+        start = datetime.datetime.strptime(self.start_date, "%Y-%m-%d")
+        end = datetime.datetime.strptime(self.end_date, "%Y-%m-%d")
+        if end < start:
+            raise ValueError("end_date不能早于start_date")
+        return self
+
+
 class DimensionItem(BaseModel):
     """诊断维度项"""
     dimension_code: str = Field(..., description="维度编码")
@@ -135,6 +183,20 @@ class DiagnosisSummaryResponse(BaseModel):
     code: int = Field(200, description="业务状态码")
     msg: str = Field("success", description="响应消息")
     data: DiagnosisResultData = Field(..., description="诊断结果数据")
+    request_id: str = Field(..., description="请求ID")
+
+
+class StoreDiagnosisResultData(BaseModel):
+    """门店诊断总结结果数据"""
+    summary: str = Field(..., description="门店时段综合分析")
+    suggestions: List[str] = Field(..., description="门店分析建议")
+
+
+class StoreDiagnosisSummaryResponse(BaseModel):
+    """门店AI时段诊断总结推理响应"""
+    code: int = Field(200, description="业务状态码")
+    msg: str = Field("success", description="响应消息")
+    data: StoreDiagnosisResultData = Field(..., description="门店诊断结果数据")
     request_id: str = Field(..., description="请求ID")
 
 

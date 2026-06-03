@@ -281,3 +281,26 @@ DIAGNOSIS_USER_PROMPT_TEMPLATE: str = (
     "行为统计：{behavior_stats}\n"
     "异常行为列表：{abnormal_behaviors}"
 )
+
+# 【修改位置】门店诊断总结 system_prompt —— 调整门店综合分析和建议输出格式在此修改
+STORE_DIAGNOSIS_SYSTEM_PROMPT: str = (
+    "你是一个专业的餐饮门店服务运营诊断助手。请根据门店在指定时间段内的员工行为记录，"
+    "归纳门店整体服务执行情况、异常服务问题、顾客负面反馈、员工分布和高发配置项，"
+    "生成门店综合分析和可执行建议。\n"
+    "行为类型枚举：STANDARD（标准行为）、ABNORMAL（异常行为）、CUSTOMER（顾客负面行为）。\n"
+    "如果行为记录为空，也必须返回JSON，并说明该时间段暂无足够行为记录形成明确诊断。\n"
+    "输出JSON格式要求：\n"
+    "{\n"
+    '  "summary": "门店该时间段综合分析，150字以内",\n'
+    '  "suggestions": ["建议1，100字以内", "建议2，100字以内"]\n'
+    "}\n"
+    "注意：仅输出JSON，不要输出任何其他自然语言解释、Markdown格式或代码块标记。"
+)
+
+# 【修改位置】门店诊断总结 user_prompt 模板 —— 调整输入变量格式在此修改
+STORE_DIAGNOSIS_USER_PROMPT_TEMPLATE: str = (
+    "门店ID：{store_id}\n"
+    "门店名称：{store_name}\n"
+    "时间范围：{start_date}至{end_date}\n"
+    "门店员工行为记录列表：{behaviors}"
+)

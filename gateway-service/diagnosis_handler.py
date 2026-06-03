@@ -25,6 +25,7 @@ from loguru import logger
 from config import (
     DATE_FORMAT,
     DIAGNOSIS_INTERNAL_PATH,
+    STORE_DIAGNOSIS_INTERNAL_PATH,
     DIAGNOSIS_REQUEST_TIMEOUT,
     REQUEST_ID_HEADER,
 )
@@ -225,6 +226,123 @@ class DiagnosisHandler:
         finally:
             await self._node_manager.decrement_connection(selected_node)
 
+    async def handle_store_diagnosis(self, request_body: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        处理门店AI时段诊断总结请求。
+        """
+        if not self._initialized or self._node_manager is None:
+            logger.error("门店AI诊断处理器未初始化，拒绝请求")
+            return build_error_response(
+                code=ErrorCode.INTERNAL_ERROR,
+                msg="诊断服务未就绪",
+            )
+
+        validation_error = self._validate_store_request(request_body)
+        if validation_error:
+            return validation_error
+
+        request_id = str(uuid.uuid4())
+        store_id = request_body.get("storeId", "")
+        store_name = request_body.get("storeName", "")
+        start_date = request_body.get("startDate", "")
+        end_date = request_body.get("endDate", "")
+        behaviors = request_body.get("behaviors", [])
+
+        logger.info(
+            f"门店AI诊断请求开始 | request_id={request_id} | "
+            f"门店={store_id}/{store_name} | 时间范围={start_date} ~ {end_date} | "
+            f"行为数={len(behaviors)}"
+        )
+
+        selected_node = self._node_manager.get_least_connection_node()
+        if selected_node is None:
+            logger.error(
+                f"门店AI诊断请求失败 | 无可用算力节点 | request_id={request_id}"
+            )
+            return build_error_response(
+                code=ErrorCode.NO_AVAILABLE_NODE,
+                msg=ErrorMsg.NO_AVAILABLE_NODE,
+                request_id=request_id,
+            )
+
+        internal_body = self._build_store_internal_body(request_body, request_id)
+        target_url = f"http://{selected_node}{STORE_DIAGNOSIS_INTERNAL_PATH}"
+
+        start_ts = time.time()
+        await self._node_manager.increment_connection(selected_node)
+
+        try:
+            client = await HttpClientSingleton.get_client()
+            forward_headers = {
+                REQUEST_ID_HEADER: request_id,
+                "Content-Type": "application/json",
+            }
+
+            logger.info(
+                f"门店AI诊断转发开始 | request_id={request_id} | "
+                f"目标={target_url} | 节点={selected_node}"
+            )
+
+            response = await client.post(
+                url=target_url,
+                json=internal_body,
+                headers=forward_headers,
+                timeout=DIAGNOSIS_REQUEST_TIMEOUT,
+            )
+
+            elapsed_ms = int((time.time() - start_ts) * 1000)
+
+            if 200 <= response.status_code < 300:
+                result = response.json()
+                if isinstance(result, dict):
+                    result["request_id"] = request_id
+
+                logger.info(
+                    f"门店AI诊断请求成功 | request_id={request_id} | "
+                    f"节点={selected_node} | 耗时={elapsed_ms}ms | 门店={store_id}"
+                )
+                return result
+
+            error_body = response.text[:500]
+            logger.error(
+                f"门店AI诊断请求失败 | request_id={request_id} | "
+                f"节点={selected_node} | 状态码={response.status_code} | "
+                f"响应={error_body} | 耗时={elapsed_ms}ms"
+            )
+            return build_error_response(
+                code=ErrorCode.NODE_REQUEST_FAILED,
+                msg=ErrorMsg.NODE_REQUEST_FAILED,
+                request_id=request_id,
+            )
+
+        except httpx.TimeoutException as e:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
+            logger.error(
+                f"门店AI诊断请求超时 | request_id={request_id} | "
+                f"节点={selected_node} | 超时类型={type(e).__name__} | "
+                f"耗时={elapsed_ms}ms | 超时阈值={DIAGNOSIS_REQUEST_TIMEOUT}s"
+            )
+            return build_error_response(
+                code=ErrorCode.GATEWAY_TIMEOUT,
+                msg=f"门店AI诊断请求超时({DIAGNOSIS_REQUEST_TIMEOUT}s)",
+                request_id=request_id,
+            )
+
+        except Exception:
+            elapsed_ms = int((time.time() - start_ts) * 1000)
+            logger.exception(
+                f"门店AI诊断请求异常 | request_id={request_id} | "
+                f"节点={selected_node} | 耗时={elapsed_ms}ms"
+            )
+            return build_error_response(
+                code=ErrorCode.NODE_REQUEST_FAILED,
+                msg=ErrorMsg.NODE_REQUEST_FAILED,
+                request_id=request_id,
+            )
+
+        finally:
+            await self._node_manager.decrement_connection(selected_node)
+
     # ==================== 参数转换：camelCase → snake_case ====================
 
     @staticmethod
@@ -291,6 +409,38 @@ class DiagnosisHandler:
             "request_id": request_id,
         }
         return internal_body
+
+    @staticmethod
+    def _build_store_internal_body(
+        request_body: Dict[str, Any], request_id: str
+    ) -> Dict[str, Any]:
+        """将门店诊断请求从camelCase转换为算力节点snake_case格式"""
+        converted_behaviors = []
+        for behavior in request_body.get("behaviors", []):
+            converted_behaviors.append(
+                {
+                    "behavior_event_id": behavior.get("behaviorEventId", ""),
+                    "behavior_type": behavior.get("behaviorType", ""),
+                    "event_time": behavior.get("eventTime", ""),
+                    "employee_id": behavior.get("employeeId", ""),
+                    "employee_name": behavior.get("employeeName", ""),
+                    "device_no": behavior.get("deviceNo", ""),
+                    "config_item_id": behavior.get("configItemId", ""),
+                    "config_item_name": behavior.get("configItemName", ""),
+                    "keyword_content": behavior.get("keywordContent", ""),
+                    "summary": behavior.get("summary", ""),
+                    "review_status": behavior.get("reviewStatus", ""),
+                }
+            )
+
+        return {
+            "store_id": request_body.get("storeId", ""),
+            "store_name": request_body.get("storeName", ""),
+            "start_date": request_body.get("startDate", ""),
+            "end_date": request_body.get("endDate", ""),
+            "behaviors": converted_behaviors,
+            "request_id": request_id,
+        }
 
     # ==================== 入参校验 ====================
 
@@ -420,6 +570,91 @@ class DiagnosisHandler:
                     )
 
         return None  # 校验通过
+
+    @staticmethod
+    def _validate_store_request(request_body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """校验门店诊断请求必传字段"""
+        for key in ["storeId", "storeName", "startDate", "endDate"]:
+            value = request_body.get(key)
+            if not value or not isinstance(value, str) or not value.strip():
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"{key}为必传字段，且必须为非空字符串",
+                )
+
+        start_date = request_body.get("startDate", "")
+        parsed_start = TimeFormatter.parse_date(start_date)
+        if not parsed_start:
+            return build_error_response(
+                code=ErrorCode.BAD_REQUEST,
+                msg=f"startDate格式不合法，要求：yyyy-MM-dd，实际：{start_date}",
+            )
+
+        end_date = request_body.get("endDate", "")
+        parsed_end = TimeFormatter.parse_date(end_date)
+        if not parsed_end:
+            return build_error_response(
+                code=ErrorCode.BAD_REQUEST,
+                msg=f"endDate格式不合法，要求：yyyy-MM-dd，实际：{end_date}",
+            )
+
+        if parsed_end < parsed_start:
+            return build_error_response(
+                code=ErrorCode.BAD_REQUEST,
+                msg="endDate不能早于startDate",
+            )
+
+        behaviors = request_body.get("behaviors")
+        if behaviors is None:
+            return build_error_response(
+                code=ErrorCode.BAD_REQUEST,
+                msg="behaviors为必传字段（可为空数组）",
+            )
+        if not isinstance(behaviors, list):
+            return build_error_response(
+                code=ErrorCode.BAD_REQUEST,
+                msg="behaviors必须为数组",
+            )
+
+        required_behavior_keys = [
+            "behaviorEventId",
+            "behaviorType",
+            "eventTime",
+            "employeeId",
+            "employeeName",
+            "deviceNo",
+            "configItemId",
+            "configItemName",
+            "keywordContent",
+            "summary",
+            "reviewStatus",
+        ]
+        valid_behavior_types = {"STANDARD", "ABNORMAL", "CUSTOMER"}
+
+        for index, behavior in enumerate(behaviors):
+            if not isinstance(behavior, dict):
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"behaviors[{index}]必须为对象",
+                )
+            for key in required_behavior_keys:
+                value = behavior.get(key)
+                if not value or not isinstance(value, str) or not value.strip():
+                    return build_error_response(
+                        code=ErrorCode.BAD_REQUEST,
+                        msg=f"behaviors[{index}].{key}为必传字段，且必须为非空字符串",
+                    )
+            behavior_type = behavior.get("behaviorType")
+            if behavior_type not in valid_behavior_types:
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=(
+                        f"behaviors[{index}].behaviorType无效，"
+                        "仅支持STANDARD/ABNORMAL/CUSTOMER"
+                    ),
+                )
+
+        return None
 
     def is_initialized(self) -> bool:
         """诊断处理器是否已初始化"""
