@@ -191,7 +191,7 @@ class DeviceEventRequest(BaseModel):
     payload: Dict[str, Any] = Field(
         ...,
         description="事件数据，根据eventType差异化校验",
-        examples=[{"batteryLevel": 86, "signalLevel": 4}],
+        examples=[{"batteryLevel": 86, "signalLevel": 4, "firmwareVersion": "badge-fw-1.0.0"}],
     )
 
     @field_validator("deviceNo")

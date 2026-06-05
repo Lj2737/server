@@ -430,11 +430,13 @@ class BackendClient:
     @staticmethod
     def _normalize_device_event_for_backend(event_data: dict) -> dict:
         normalized = dict(event_data or {})
+        payload = dict(normalized.get("payload") or {})
+        normalized["payload"] = payload
+
         if normalized.get("eventType") != "HEARTBEAT":
             return normalized
 
         normalized["reportTime"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        payload = dict(normalized.get("payload") or {})
         if "signalPercent" not in payload and "signalLevel" in payload:
             try:
                 payload["signalPercent"] = int(payload["signalLevel"]) * 20

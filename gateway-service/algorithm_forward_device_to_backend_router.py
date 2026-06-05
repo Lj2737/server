@@ -19,6 +19,7 @@ class AlgorithmDeviceEventRequest(BaseModel):
     与硬件上报给算法的 /badge/v1/internal/hardware/device-events 区分：
     - 硬件心跳 payload 使用 signalLevel
     - 算法转发后端 payload 使用 signalPercent
+    - firmwareVersion 由硬件上报，算法透传给后端
     """
     deviceNo: str = Field(..., min_length=1, description="设备编号")
     eventType: str = Field(..., description="事件类型：HEARTBEAT/ALARM")
@@ -35,6 +36,7 @@ class AlgorithmDeviceEventRequest(BaseModel):
                     "payload": {
                         "batteryLevel": 86,
                         "signalPercent": 75,
+                        "firmwareVersion": "v1.0.0",
                     },
                 },
                 {
@@ -44,6 +46,7 @@ class AlgorithmDeviceEventRequest(BaseModel):
                     "payload": {
                         "alarmCode": "MIC_ERROR",
                         "alarmStatus": "ACTIVE",
+                        "firmwareVersion": "v1.0.0",
                     },
                 },
             ]
