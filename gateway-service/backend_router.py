@@ -48,6 +48,13 @@ class DimensionScoreItem(BaseModel):
         description="维度得分，范围0-100",
         examples=[82.0],
     )
+    avgScore: float = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="该维度平均分，范围0-100，用于优势/薄弱维度判断",
+        examples=[76.0],
+    )
 
 
 class AbnormalBehaviorItem(BaseModel):
@@ -146,8 +153,8 @@ class DiagnosisRequest(BaseModel):
         description="维度评分列表，至少1个维度",
         examples=[
             [
-                {"dimensionCode": "SERVICE_RESPONSE", "score": 82},
-                {"dimensionCode": "PROFESSIONAL_SKILL", "score": 90},
+                {"dimensionCode": "SERVICE_RESPONSE", "score": 82, "avgScore": 76},
+                {"dimensionCode": "PROFESSIONAL_SKILL", "score": 90, "avgScore": 82},
             ]
         ],
     )
@@ -294,7 +301,7 @@ async def diagnosis_summary(request: DiagnosisRequest):
         "endDate": "2026-05-08",
         "score": 86,
         "dimensionScores": [
-            {"dimensionCode": "SERVICE_RESPONSE", "score": 82}
+            {"dimensionCode": "SERVICE_RESPONSE", "score": 86, "avgScore": 78}
         ],
         "behaviorStats": {
             "standardCount": 12,

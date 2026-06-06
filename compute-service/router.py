@@ -48,6 +48,62 @@ from schemas import (
 router = APIRouter()
 
 
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _select_diagnosis_dimensions(dimension_scores: list[dict]) -> list[dict]:
+    """
+    按产品规则筛选员工诊断维度：
+    - 优势：score >= 85 且 score - avg_score >= 5，最多2个，差值高者优先
+    - 薄弱：score < 75 且 avg_score - score >= 5，最多2个，差值高者优先
+    """
+    strengths = []
+    weaknesses = []
+
+    for item in dimension_scores or []:
+        if not isinstance(item, dict):
+            continue
+        dimension_code = str(item.get("dimension_code", "")).strip()
+        if not dimension_code:
+            continue
+
+        score = _to_float(item.get("score"))
+        avg_score = _to_float(item.get("avg_score"))
+        diff = score - avg_score
+        normalized = {
+            **item,
+            "dimension_code": dimension_code,
+            "score": score,
+            "avg_score": avg_score,
+            "score_diff": round(diff, 2),
+        }
+
+        if score >= 85 and diff >= 5:
+            normalized["dimension_type"] = DimensionType.STRENGTH
+            strengths.append(normalized)
+        elif score < 75 and -diff >= 5:
+            normalized["dimension_type"] = DimensionType.WEAKNESS
+            normalized["below_avg_diff"] = round(-diff, 2)
+            weaknesses.append(normalized)
+
+    strengths.sort(key=lambda x: (x["score_diff"], x["score"]), reverse=True)
+    weaknesses.sort(key=lambda x: (x["below_avg_diff"], -x["score"]), reverse=True)
+    return strengths[:2] + weaknesses[:2]
+
+
+def _fallback_dimension_summary(dim: dict) -> str:
+    score = _to_float(dim.get("score"))
+    avg_score = _to_float(dim.get("avg_score"))
+    diff = _to_float(dim.get("score_diff"))
+    if dim.get("dimension_type") == DimensionType.STRENGTH:
+        return f"该维度得分{score:g}分，高于平均分{avg_score:g}分，表现优于平均水平。"
+    return f"该维度得分{score:g}分，低于平均分{avg_score:g}分，存在明显改进空间。"
+
+
 def _keyword_content_in_asr(keyword_content: str, asr_text: str) -> bool:
     keyword = (keyword_content or "").strip()
     source = (asr_text or "").strip()
@@ -737,13 +793,34 @@ async def diagnosis_summary(body: DiagnosisSummaryRequest):
                 f"时间范围={body.start_date}~{body.end_date}"
             )
 
+            selected_dimension_scores = _select_diagnosis_dimensions(
+                body.dimension_scores
+            )
+            if not selected_dimension_scores:
+                result = {
+                    "code": 200,
+                    "msg": "success",
+                    "data": {
+                        "summary": "该时间段暂无满足优势或薄弱规则的维度，整体表现未形成显著维度差异。",
+                        "dimensions": [],
+                    },
+                    "request_id": request_id,
+                }
+                await idempotency_cache.set(idempotency_key, result)
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                logger.info(
+                    f"诊断总结完成 | request_id={request_id} | "
+                    f"维度数=0 | 原因=无符合规则维度 | 耗时={elapsed_ms}ms"
+                )
+                return result
+
             try:
                 llm_result = await llm_model.diagnosis_inference(
                     employee_no=body.employee_no,
                     start_date=body.start_date,
                     end_date=body.end_date,
                     score=body.score,
-                    dimension_scores=body.dimension_scores,
+                    dimension_scores=selected_dimension_scores,
                     behavior_stats=body.behavior_stats,
                     abnormal_behaviors=body.abnormal_behaviors,
                 )
@@ -758,19 +835,33 @@ async def diagnosis_summary(body: DiagnosisSummaryRequest):
                 )
 
             # ========== ⑤ 封装结果 ==========
-            # 强制校验dimension_type枚举值
-            dimensions = llm_result.get("dimensions", [])
-            for dim in dimensions:
-                dim_type = dim.get("dimension_type", "")
-                if dim_type not in [DimensionType.STRENGTH, DimensionType.WEAKNESS]:
-                    logger.warning(
-                        f"dimension_type枚举值异常 | 原始值={dim_type} | "
-                        f"回退为STRENGTH | request_id={request_id}"
-                    )
-                    dim["dimension_type"] = DimensionType.STRENGTH
-                # WEAKNESS维度必须有suggestion
+            # 按规则强制校正返回维度，最多2个优势+2个薄弱
+            llm_dimensions = llm_result.get("dimensions", [])
+            llm_dimension_map = {
+                str(dim.get("dimension_code", "")).strip(): dim
+                for dim in llm_dimensions
+                if isinstance(dim, dict)
+            }
+            dimensions = []
+            for selected_dim in selected_dimension_scores:
+                dimension_code = selected_dim["dimension_code"]
+                dim = dict(llm_dimension_map.get(dimension_code, {}))
+                dim["dimension_code"] = dimension_code
+                dim["dimension_type"] = selected_dim["dimension_type"]
+                if not dim.get("summary"):
+                    dim["summary"] = _fallback_dimension_summary(selected_dim)
                 if dim["dimension_type"] == DimensionType.WEAKNESS and not dim.get("suggestion"):
                     dim["suggestion"] = "暂无改进建议"
+                if dim["dimension_type"] == DimensionType.STRENGTH:
+                    dim["suggestion"] = dim.get("suggestion") or ""
+                dimensions.append(
+                    {
+                        "dimension_code": dim["dimension_code"],
+                        "dimension_type": dim["dimension_type"],
+                        "summary": dim["summary"],
+                        "suggestion": dim.get("suggestion") or "",
+                    }
+                )
 
             result = {
                 "code": 200,

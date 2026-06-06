@@ -762,7 +762,6 @@ class LLMModel:
     def _sanitize_json_text(text: str) -> str:
         cleaned = text.strip()
         cleaned = cleaned.replace("\ufeff", "")
-        cleaned = cleaned.translate({0x201C: 34, 0x201D: 34, 0x2018: 39, 0x2019: 39})
         cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
         cleaned = re.sub(r'([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:', r'\1"\2":', cleaned)
         return cleaned

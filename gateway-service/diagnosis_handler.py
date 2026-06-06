@@ -168,11 +168,23 @@ class DiagnosisHandler:
                 if isinstance(result_data, dict):
                     # 转换dimension_type → dimensionType, dimension_code → dimensionCode
                     dimensions = result_data.get("dimensions", [])
+                    normalized_dimensions = []
                     for dim in dimensions:
+                        if not isinstance(dim, dict):
+                            continue
                         if "dimension_type" in dim and "dimensionType" not in dim:
                             dim["dimensionType"] = dim.pop("dimension_type")
                         if "dimension_code" in dim and "dimensionCode" not in dim:
                             dim["dimensionCode"] = dim.pop("dimension_code")
+                        normalized_dimensions.append(
+                            {
+                                "dimensionCode": dim.get("dimensionCode", ""),
+                                "dimensionType": dim.get("dimensionType", ""),
+                                "summary": dim.get("summary", ""),
+                                "suggestion": dim.get("suggestion") or "",
+                            }
+                        )
+                    result_data["dimensions"] = normalized_dimensions
 
                 logger.info(
                     f"AI诊断请求成功 | request_id={request_id} | "
@@ -377,6 +389,7 @@ class DiagnosisHandler:
             converted_dim = {
                 "dimension_code": dim.get("dimensionCode", ""),
                 "score": dim.get("score", 0),
+                "avg_score": dim.get("avgScore", 0),
             }
             converted_scores.append(converted_dim)
 
@@ -528,6 +541,21 @@ class DiagnosisHandler:
                 return build_error_response(
                     code=ErrorCode.BAD_REQUEST,
                     msg=f"dimensionScores[{i}]缺少score字段",
+                )
+            if "avgScore" not in dim:
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"dimensionScores[{i}]缺少avgScore字段",
+                )
+            if not isinstance(dim["score"], (int, float)):
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"dimensionScores[{i}].score必须为数值类型",
+                )
+            if not isinstance(dim["avgScore"], (int, float)):
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"dimensionScores[{i}].avgScore必须为数值类型",
                 )
 
         # 校验behaviorStats
