@@ -60,8 +60,8 @@ class DiagnosisSummaryRequest(BaseModel):
         description="维度评分列表，至少1个维度",
         examples=[
             [
-                {"dimension_code": "SERVICE_ATTITUDE", "score": 90.0, "avg_score": 82.0},
-                {"dimension_code": "PROFESSIONAL_SKILL", "score": 80.0, "avg_score": 74.0},
+                {"dimension_code": "SERVICE_ATTITUDE", "dimension_name": "服务态度", "score": 90.0, "avg_score": 82.0},
+                {"dimension_code": "PROFESSIONAL_SKILL", "dimension_name": "专业技能", "score": 80.0, "avg_score": 74.0},
             ]
         ],
     )

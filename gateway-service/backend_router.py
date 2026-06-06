@@ -41,6 +41,12 @@ class DimensionScoreItem(BaseModel):
         description="维度编码，如 SERVICE_RESPONSE",
         examples=["SERVICE_RESPONSE"],
     )
+    dimensionName: str = Field(
+        ...,
+        min_length=1,
+        description="维度名称，用于AI诊断建议生成",
+        examples=["服务响应"],
+    )
     score: float = Field(
         ...,
         ge=0,
@@ -153,8 +159,8 @@ class DiagnosisRequest(BaseModel):
         description="维度评分列表，至少1个维度",
         examples=[
             [
-                {"dimensionCode": "SERVICE_RESPONSE", "score": 82, "avgScore": 76},
-                {"dimensionCode": "PROFESSIONAL_SKILL", "score": 90, "avgScore": 82},
+                {"dimensionCode": "SERVICE_RESPONSE", "dimensionName": "服务响应", "score": 82, "avgScore": 76},
+                {"dimensionCode": "PROFESSIONAL_SKILL", "dimensionName": "专业技能", "score": 90, "avgScore": 82},
             ]
         ],
     )
@@ -301,7 +307,7 @@ async def diagnosis_summary(request: DiagnosisRequest):
         "endDate": "2026-05-08",
         "score": 86,
         "dimensionScores": [
-            {"dimensionCode": "SERVICE_RESPONSE", "score": 86, "avgScore": 78}
+            {"dimensionCode": "SERVICE_RESPONSE", "dimensionName": "服务响应", "score": 86, "avgScore": 78}
         ],
         "behaviorStats": {
             "standardCount": 12,

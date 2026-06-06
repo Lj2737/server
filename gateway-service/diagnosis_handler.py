@@ -388,6 +388,7 @@ class DiagnosisHandler:
         for dim in dimension_scores:
             converted_dim = {
                 "dimension_code": dim.get("dimensionCode", ""),
+                "dimension_name": dim.get("dimensionName", ""),
                 "score": dim.get("score", 0),
                 "avg_score": dim.get("avgScore", 0),
             }
@@ -536,6 +537,16 @@ class DiagnosisHandler:
                 return build_error_response(
                     code=ErrorCode.BAD_REQUEST,
                     msg=f"dimensionScores[{i}].dimensionCode必须为非空字符串",
+                )
+            if "dimensionName" not in dim:
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"dimensionScores[{i}]缺少dimensionName字段",
+                )
+            if not isinstance(dim["dimensionName"], str) or not dim["dimensionName"].strip():
+                return build_error_response(
+                    code=ErrorCode.BAD_REQUEST,
+                    msg=f"dimensionScores[{i}].dimensionName必须为非空字符串",
                 )
             if "score" not in dim:
                 return build_error_response(

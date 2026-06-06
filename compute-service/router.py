@@ -70,6 +70,7 @@ def _select_diagnosis_dimensions(dimension_scores: list[dict]) -> list[dict]:
         dimension_code = str(item.get("dimension_code", "")).strip()
         if not dimension_code:
             continue
+        dimension_name = str(item.get("dimension_name") or dimension_code).strip()
 
         score = _to_float(item.get("score"))
         avg_score = _to_float(item.get("avg_score"))
@@ -77,6 +78,7 @@ def _select_diagnosis_dimensions(dimension_scores: list[dict]) -> list[dict]:
         normalized = {
             **item,
             "dimension_code": dimension_code,
+            "dimension_name": dimension_name,
             "score": score,
             "avg_score": avg_score,
             "score_diff": round(diff, 2),
@@ -96,12 +98,23 @@ def _select_diagnosis_dimensions(dimension_scores: list[dict]) -> list[dict]:
 
 
 def _fallback_dimension_summary(dim: dict) -> str:
+    dimension_name = str(dim.get("dimension_name") or dim.get("dimension_code") or "该维度").strip()
     score = _to_float(dim.get("score"))
     avg_score = _to_float(dim.get("avg_score"))
     diff = _to_float(dim.get("score_diff"))
     if dim.get("dimension_type") == DimensionType.STRENGTH:
-        return f"该维度得分{score:g}分，高于平均分{avg_score:g}分，表现优于平均水平。"
-    return f"该维度得分{score:g}分，低于平均分{avg_score:g}分，存在明显改进空间。"
+        return f"{dimension_name}得分{score:g}分，高于平均分{avg_score:g}分，表现优于平均水平。"
+    return f"{dimension_name}得分{score:g}分，低于平均分{avg_score:g}分，存在明显改进空间。"
+
+
+def _fallback_weakness_suggestion(dim: dict) -> str:
+    dimension_name = str(dim.get("dimension_name") or dim.get("dimension_code") or "该薄弱维度").strip()
+    score = _to_float(dim.get("score"))
+    avg_score = _to_float(dim.get("avg_score"))
+    return (
+        f"针对{dimension_name}得分{score:g}分、低于平均分{avg_score:g}分的薄弱表现，"
+        "建议复盘相关服务场景，补充标准话术训练并持续跟踪改进效果。"
+    )
 
 
 def _keyword_content_in_asr(keyword_content: str, asr_text: str) -> bool:
@@ -851,9 +864,9 @@ async def diagnosis_summary(body: DiagnosisSummaryRequest):
                 if not dim.get("summary"):
                     dim["summary"] = _fallback_dimension_summary(selected_dim)
                 if dim["dimension_type"] == DimensionType.WEAKNESS and not dim.get("suggestion"):
-                    dim["suggestion"] = "暂无改进建议"
+                    dim["suggestion"] = _fallback_weakness_suggestion(selected_dim)
                 if dim["dimension_type"] == DimensionType.STRENGTH:
-                    dim["suggestion"] = dim.get("suggestion") or ""
+                    dim["suggestion"] = ""
                 dimensions.append(
                     {
                         "dimension_code": dim["dimension_code"],

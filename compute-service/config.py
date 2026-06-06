@@ -142,7 +142,7 @@ BEHAVIOR_LLM_MAX_RETRIES: int = _env_int("BEHAVIOR_LLM_MAX_RETRIES", 1)
 # 温度（略高于行为识别，允许一定创造性但不过度发散）
 DIAGNOSIS_LLM_TEMPERATURE: float = _env_float("DIAGNOSIS_LLM_TEMPERATURE", 0.3)
 # 最大输出token数（诊断总结需要更长输出）
-DIAGNOSIS_LLM_MAX_TOKENS: int = _env_int("DIAGNOSIS_LLM_MAX_TOKENS", 1024)
+DIAGNOSIS_LLM_MAX_TOKENS: int = _env_int("DIAGNOSIS_LLM_MAX_TOKENS", 2048)
 # 停止标记
 DIAGNOSIS_LLM_STOP: List[str] = ["<|im_end|>"]
 # JSON输出校验失败后最大重试次数
@@ -257,6 +257,11 @@ DIAGNOSIS_SYSTEM_PROMPT: str = (
     "你是一个专业的餐饮员工服务能力诊断助手。请根据员工的历史行为数据、评分数据，"
     "生成多维度诊断总结。\n"
     "维度类型枚举：STRENGTH（优势维度）、WEAKNESS（薄弱维度）\n"
+    "维度评分输入已按规则筛选：优势维度要求score>=85且score-avg_score>=5；"
+    "薄弱维度要求score<75且avg_score-score>=5。请只输出输入中的维度，不要新增维度。\n"
+    "每个维度评分包含dimension_name、score、avg_score。生成建议时必须使用dimension_name和分数进行判断。\n"
+    "suggestion只针对dimension_type=WEAKNESS的薄弱维度生成，必须围绕该薄弱维度名称、当前分和平均分给出可执行建议；"
+    "dimension_type=STRENGTH时suggestion必须为空字符串。\n"
     "输出JSON格式要求：\n"
     "{\n"
     '  "summary": "该时间段总体服务表现总结，150字以内",\n'
