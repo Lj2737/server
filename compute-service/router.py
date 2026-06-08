@@ -369,6 +369,7 @@ async def ai_dialog_chat(
                             chat_id=chat_id,
                             user_content=asr_text,
                             knowledge_base_id=resolved_knowledge_base_id,
+                            memory_key=device_no,
                         ):
                             reply_id = chunk.get("id") or reply_id
                             content = chunk.get("content") or ""
@@ -429,6 +430,7 @@ async def ai_dialog_chat(
                     chat_id=chat_id,
                     user_content=asr_text,
                     knowledge_base_id=resolved_knowledge_base_id,
+                    memory_key=device_no,
                 )
             except Exception as e:
                 logger.error(

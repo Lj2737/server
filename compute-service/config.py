@@ -125,6 +125,7 @@ FASTGPT_API_KEY: str = _env_str("FASTGPT_API_KEY")
 FASTGPT_API_TIMEOUT: float = _env_float("FASTGPT_API_TIMEOUT", 60.0)
 FASTGPT_DATASET_VARIABLE_NAME: str = _env_str("FASTGPT_DATASET_VARIABLE_NAME", "datasetid")
 FASTGPT_DATASET_VARIABLE_KEY: str = _env_str("FASTGPT_DATASET_VARIABLE_KEY", "id1")
+FASTGPT_MEMORY_TURNS: int = _env_int("FASTGPT_MEMORY_TURNS", 3)
 
 
 # ==================== 行为识别LLM推理参数 ====================
