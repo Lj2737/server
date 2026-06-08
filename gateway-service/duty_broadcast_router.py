@@ -106,6 +106,8 @@ _dialog_tasks: Dict[str, asyncio.Task] = {}
 _dialog_task_dialog_ids: Dict[str, str] = {}
 _dialog_versions: Dict[str, int] = {}
 _dialog_locks: Dict[str, asyncio.Lock] = {}
+_broadcast_lock = asyncio.Lock()
+_pending_broadcast_devices: set[str] = set()
 _DIALOG_INTERRUPT_WAIT_SECONDS = 1.0
 _DIALOG_START_DEBOUNCE_SECONDS = 0.35
 
@@ -147,16 +149,24 @@ async def _broadcast_badge_binding_missing(
             )
             return
 
+        if ws_device_manager.is_device_streaming(device_no):
+            logger.warning(
+                f"Badge binding missing broadcast skipped | deviceNo={device_no} | "
+                f"path={source_path} | reason=device streaming"
+            )
+            return
+
         audio_stream = piper_tts_manager.synthesize_stream(broadcast_content)
-        success = await ws_device_manager.push_audio_stream(
+        success, reason = await ws_device_manager.push_audio_stream(
             device_no=device_no,
             audio_stream=audio_stream,
             broadcast_content=broadcast_content,
+            broadcast_id=f"binding-missing:{int(time.time() * 1000)}",
         )
         if not success:
             logger.warning(
                 f"Badge binding missing broadcast push failed | deviceNo={device_no} | "
-                f"path={source_path}"
+                f"path={source_path} | reason={reason}"
             )
             return
 
@@ -169,6 +179,60 @@ async def _broadcast_badge_binding_missing(
             f"Badge binding missing broadcast exception | deviceNo={device_no} | "
             f"path={source_path} | errorType={type(exc).__name__} | error={str(exc)[:300]}"
         )
+
+
+async def _release_broadcast_device(device_no: str, broadcast_id: str) -> None:
+    async with _broadcast_lock:
+        _pending_broadcast_devices.discard(device_no)
+    logger.debug(
+        f"Broadcast device slot released | deviceNo={device_no} | "
+        f"broadcastId={broadcast_id}"
+    )
+
+
+async def _run_duty_broadcast_task(
+    *,
+    broadcast_id: str,
+    device_no: str,
+    broadcast_content: str,
+    accepted_at: float,
+) -> None:
+    start_time = time.time()
+    try:
+        logger.info(
+            f"值班播报后台任务开始 | broadcastId={broadcast_id} | "
+            f"deviceNo={device_no} | 内容长度={len(broadcast_content)}"
+        )
+        audio_stream = piper_tts_manager.synthesize_stream(broadcast_content)
+        push_success, push_reason = await ws_device_manager.push_audio_stream(
+            device_no=device_no,
+            audio_stream=audio_stream,
+            broadcast_content=broadcast_content,
+            broadcast_id=broadcast_id,
+        )
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        total_elapsed_ms = int((time.time() - accepted_at) * 1000)
+        if push_success:
+            logger.info(
+                f"值班播报后台任务完成 | broadcastId={broadcast_id} | "
+                f"deviceNo={device_no} | 耗时={elapsed_ms}ms | "
+                f"总耗时={total_elapsed_ms}ms"
+            )
+        else:
+            logger.warning(
+                f"值班播报后台任务失败 | broadcastId={broadcast_id} | "
+                f"deviceNo={device_no} | reason={push_reason or '音频推送失败'} | "
+                f"耗时={elapsed_ms}ms | 总耗时={total_elapsed_ms}ms"
+            )
+    except Exception as exc:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        logger.exception(
+            f"值班播报后台任务异常 | broadcastId={broadcast_id} | "
+            f"deviceNo={device_no} | 异常类型={type(exc).__name__} | "
+            f"错误={str(exc)[:200]} | 耗时={elapsed_ms}ms"
+        )
+    finally:
+        await _release_broadcast_device(device_no, broadcast_id)
 
 
 def _next_dialog_version(device_no: str) -> int:
@@ -749,54 +813,41 @@ async def duty_broadcast_tts(request: DutyBroadcastRequest):
             reason="设备不在线",
         )
 
-    # ========== ④⑤ 流式合成 + 流式推送 ==========
-    try:
-        # 获取TTS API音频分块（异步生成器）
-        audio_stream = piper_tts_manager.synthesize_stream(broadcast_content)
-
-        # 流式推送到设备
-        push_success = await ws_device_manager.push_audio_stream(
-            device_no=device_no,
-            audio_stream=audio_stream,
-            broadcast_content=broadcast_content,
-        )
-
-        # ========== ⑥ 返回结果 ==========
-        elapsed_ms = int((time.time() - start_time) * 1000)
-
-        if push_success:
-            logger.info(
-                f"值班播报完成 | request_id={request_id} | "
-                f"deviceNo={device_no} | 耗时={elapsed_ms}ms"
-            )
-            return _build_broadcast_response(
-                request_id=request_id,
-                success=True,
-            )
-        else:
+    async with _broadcast_lock:
+        if (
+            device_no in _pending_broadcast_devices
+            or ws_device_manager.is_device_streaming(device_no)
+        ):
             logger.warning(
-                f"值班播报推送失败 | request_id={request_id} | "
-                f"deviceNo={device_no} | 耗时={elapsed_ms}ms"
+                f"值班播报失败 | 设备正在播报 | request_id={request_id} | "
+                f"deviceNo={device_no}"
             )
             return _build_broadcast_response(
                 request_id=request_id,
                 success=False,
-                reason="音频推送失败",
+                reason="设备正在播报",
             )
+        _pending_broadcast_devices.add(device_no)
 
-    except Exception as e:
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        logger.error(
-            f"值班播报异常 | request_id={request_id} | "
-            f"deviceNo={device_no} | "
-            f"异常类型={type(e).__name__} | "
-            f"错误={str(e)[:200]} | 耗时={elapsed_ms}ms"
-        )
-        return _build_broadcast_response(
-            request_id=request_id,
-            success=False,
-            reason="播报服务异常",
-        )
+    asyncio.create_task(
+        _run_duty_broadcast_task(
+            broadcast_id=request_id,
+            device_no=device_no,
+            broadcast_content=broadcast_content,
+            accepted_at=start_time,
+        ),
+        name=f"duty-broadcast-{request_id}",
+    )
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(
+        f"值班播报任务已接收 | request_id={request_id} | "
+        f"deviceNo={device_no} | 耗时={elapsed_ms}ms"
+    )
+    return _build_broadcast_response(
+        request_id=request_id,
+        success=True,
+    )
 
 
 # ==================== 响应构建 ====================

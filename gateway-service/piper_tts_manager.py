@@ -33,8 +33,11 @@ from config import (
     TTS_REALTIME_VOICE,
     TTS_REALTIME_WS_URL,
     TTS_RESPONSE_FORMAT,
+    TTS_TARGET_CHANNELS,
     TTS_TARGET_SAMPLE_RATE,
+    TTS_TARGET_SAMPLE_WIDTH,
     TTS_VOICE,
+    BROADCAST_MAX_AUDIO_SECONDS,
 )
 
 
@@ -102,6 +105,17 @@ class PiperTTSManager:
 
         audio_bytes = await self._request_tts(text.strip())
         pcm_bytes = self._normalize_audio_bytes(audio_bytes)
+        duration_seconds = self._pcm_duration_seconds(pcm_bytes)
+        if (
+            BROADCAST_MAX_AUDIO_SECONDS > 0
+            and duration_seconds > BROADCAST_MAX_AUDIO_SECONDS
+        ):
+            raise RuntimeError(
+                "TTS audio duration exceeds broadcast limit. "
+                f"duration={duration_seconds:.2f}s | "
+                f"limit={BROADCAST_MAX_AUDIO_SECONDS:.2f}s | "
+                f"textLength={len(text)}"
+            )
         # from test_ import diagnostics
         # diagnostics.check_normalized_pcm(pcm_bytes,len(audio_bytes))
 
@@ -121,7 +135,7 @@ class PiperTTSManager:
 
         logger.info(
             f"TTS synthesis completed | textLength={len(text)} | "
-            f"audioBytes={len(pcm_bytes)}"
+            f"audioBytes={len(pcm_bytes)} | duration={duration_seconds:.2f}s"
         )
 
     async def synthesize_realtime_stream(
@@ -497,6 +511,15 @@ class PiperTTSManager:
             "Use pcm or wav when the badge expects raw PCM frames."
         )
         return audio_bytes
+
+    @staticmethod
+    def _pcm_duration_seconds(pcm_bytes: bytes) -> float:
+        bytes_per_second = (
+            TTS_TARGET_SAMPLE_RATE * TTS_TARGET_SAMPLE_WIDTH * TTS_TARGET_CHANNELS
+        )
+        if bytes_per_second <= 0:
+            return 0.0
+        return len(pcm_bytes) / bytes_per_second
 
     @staticmethod
     def _wav_to_pcm(wav_bytes: bytes) -> bytes:

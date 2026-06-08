@@ -237,12 +237,13 @@ class WebSocketDeviceManager:
         device_no: str,
         audio_stream: AsyncGenerator[bytes, None],
         broadcast_content: str = "",
-    ) -> bool:
+        broadcast_id: str = "",
+    ) -> tuple[bool, str]:
         """Push broadcast audio to a device using broadcast_start/end frames."""
         conn = self._connections.get(device_no)
         if conn is None:
             logger.warning(f"Broadcast audio push skipped; device offline | deviceNo={device_no}")
-            return False
+            return False, "设备不在线"
 
         start_time = time.time()
         total_bytes = 0
@@ -253,13 +254,20 @@ class WebSocketDeviceManager:
             async with conn.send_lock:
                 if self._connections.get(device_no) is not conn:
                     logger.warning(f"Broadcast audio push skipped; stale connection | deviceNo={device_no}")
-                    return False
+                    return False, "设备连接已失效"
 
                 await conn.websocket.send_text(
                     json.dumps(
                         {
                             "type": "broadcast_start",
+                            "broadcastId": broadcast_id,
                             "content": broadcast_content,
+                            "audio": {
+                                "format": "pcm",
+                                "sampleRate": TTS_TARGET_SAMPLE_RATE,
+                                "sampleWidth": TTS_TARGET_SAMPLE_WIDTH,
+                                "channels": TTS_TARGET_CHANNELS,
+                            },
                         },
                         ensure_ascii=False,
                     )
@@ -271,37 +279,49 @@ class WebSocketDeviceManager:
                     chunk_count += 1
                     await self._pace_audio_chunk(len(pcm_chunk))
 
-                await conn.websocket.send_text(json.dumps({"type": "broadcast_end"}, ensure_ascii=False))
+                await conn.websocket.send_text(
+                    json.dumps(
+                        {"type": "broadcast_end", "broadcastId": broadcast_id},
+                        ensure_ascii=False,
+                    )
+                )
 
             elapsed_ms = int((time.time() - start_time) * 1000)
-            audio_duration = total_bytes / (2 * 16000) if total_bytes > 0 else 0
+            audio_duration = self._audio_duration_seconds(total_bytes)
             logger.info(
-                f"Broadcast audio pushed | deviceNo={device_no} | chunks={chunk_count} | "
+                f"Broadcast audio pushed | deviceNo={device_no} | broadcastId={broadcast_id} | chunks={chunk_count} | "
                 f"bytes={total_bytes} | duration={audio_duration:.2f}s | elapsed={elapsed_ms}ms"
             )
-            return True
+            return True, ""
         except WebSocketDisconnect:
             logger.warning(f"Broadcast audio push interrupted; device disconnected | deviceNo={device_no}")
             await self.unregister_device(device_no, websocket=conn.websocket)
-            return False
+            return False, "设备连接已断开"
         except Exception as exc:
+            error_text = str(exc)
+            reason = (
+                "播报音频过长"
+                if "TTS audio duration exceeds broadcast limit" in error_text
+                else "音频推送失败"
+            )
             logger.error(
-                f"Broadcast audio push failed | deviceNo={device_no} | chunks={chunk_count} | "
-                f"bytes={total_bytes} | errorType={type(exc).__name__} | error={str(exc)[:200]}"
+                f"Broadcast audio push failed | deviceNo={device_no} | broadcastId={broadcast_id} | chunks={chunk_count} | "
+                f"bytes={total_bytes} | reason={reason} | errorType={type(exc).__name__} | error={error_text[:200]}"
             )
             try:
                 await conn.websocket.send_text(
                     json.dumps(
                         {
                             "type": "broadcast_error",
-                            "message": "broadcast audio push failed",
+                            "broadcastId": broadcast_id,
+                            "message": reason,
                         },
                         ensure_ascii=False,
                     )
                 )
             except Exception:
                 pass
-            return False
+            return False, reason
         finally:
             self._streaming_devices.discard(device_no)
 
@@ -424,6 +444,20 @@ class WebSocketDeviceManager:
         if device_no in self._connections:
             self._connections[device_no].record_pong()
             logger.debug(f"WebSocket pong received | deviceNo={device_no}")
+
+    def is_device_streaming(self, device_no: str) -> bool:
+        return device_no in self._streaming_devices
+
+    @staticmethod
+    def _audio_bytes_per_second() -> int:
+        return TTS_TARGET_SAMPLE_RATE * TTS_TARGET_SAMPLE_WIDTH * TTS_TARGET_CHANNELS
+
+    @classmethod
+    def _audio_duration_seconds(cls, total_bytes: int) -> float:
+        bytes_per_second = cls._audio_bytes_per_second()
+        if bytes_per_second <= 0 or total_bytes <= 0:
+            return 0.0
+        return total_bytes / bytes_per_second
 
     async def close_all(self) -> None:
         """Close all device WebSocket connections."""
