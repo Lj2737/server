@@ -39,6 +39,7 @@ import json
 import time
 import wave
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -55,6 +56,7 @@ from config import (
     AI_DIALOG_SAMPLE_WIDTH,
     BROADCAST_DEVICE_NO_MAX_LENGTH,
     BROADCAST_CONTENT_MAX_LENGTH,
+    BROADCAST_QUEUE_MAX_SIZE,
 )
 from http_client import HttpClientSingleton
 from node_manager import NodeManager
@@ -107,9 +109,18 @@ _dialog_task_dialog_ids: Dict[str, str] = {}
 _dialog_versions: Dict[str, int] = {}
 _dialog_locks: Dict[str, asyncio.Lock] = {}
 _broadcast_lock = asyncio.Lock()
-_pending_broadcast_devices: set[str] = set()
+_broadcast_queues: Dict[str, asyncio.Queue] = {}
+_broadcast_workers: Dict[str, asyncio.Task] = {}
 _DIALOG_INTERRUPT_WAIT_SECONDS = 1.0
 _DIALOG_START_DEBOUNCE_SECONDS = 0.35
+
+
+@dataclass
+class _BroadcastJob:
+    broadcast_id: str
+    device_no: str
+    broadcast_content: str
+    accepted_at: float
 
 
 def _get_dialog_lock(device_no: str) -> asyncio.Lock:
@@ -181,13 +192,60 @@ async def _broadcast_badge_binding_missing(
         )
 
 
-async def _release_broadcast_device(device_no: str, broadcast_id: str) -> None:
-    async with _broadcast_lock:
-        _pending_broadcast_devices.discard(device_no)
-    logger.debug(
-        f"Broadcast device slot released | deviceNo={device_no} | "
-        f"broadcastId={broadcast_id}"
+def _get_or_create_broadcast_queue(device_no: str) -> asyncio.Queue:
+    queue = _broadcast_queues.get(device_no)
+    if queue is None:
+        queue = asyncio.Queue(maxsize=max(BROADCAST_QUEUE_MAX_SIZE, 1))
+        _broadcast_queues[device_no] = queue
+    return queue
+
+
+def _ensure_broadcast_worker_locked(device_no: str) -> None:
+    worker = _broadcast_workers.get(device_no)
+    if worker is not None and not worker.done():
+        return
+
+    worker = asyncio.create_task(
+        _broadcast_worker(device_no),
+        name=f"duty-broadcast-worker-{device_no}",
     )
+    _broadcast_workers[device_no] = worker
+
+
+async def _broadcast_worker(device_no: str) -> None:
+    logger.info(f"Duty broadcast worker started | deviceNo={device_no}")
+    try:
+        while True:
+            async with _broadcast_lock:
+                queue = _broadcast_queues.get(device_no)
+                if queue is None or queue.empty():
+                    _broadcast_queues.pop(device_no, None)
+                    _broadcast_workers.pop(device_no, None)
+                    logger.info(f"Duty broadcast worker stopped | deviceNo={device_no}")
+                    return
+                job = queue.get_nowait()
+
+            try:
+                await _run_duty_broadcast_task(
+                    broadcast_id=job.broadcast_id,
+                    device_no=job.device_no,
+                    broadcast_content=job.broadcast_content,
+                    accepted_at=job.accepted_at,
+                )
+            finally:
+                queue.task_done()
+    except asyncio.CancelledError:
+        logger.info(f"Duty broadcast worker cancelled | deviceNo={device_no}")
+        raise
+    except Exception as exc:
+        logger.exception(
+            f"Duty broadcast worker exception | deviceNo={device_no} | "
+            f"errorType={type(exc).__name__} | error={str(exc)[:200]}"
+        )
+        async with _broadcast_lock:
+            current_worker = _broadcast_workers.get(device_no)
+            if current_worker is asyncio.current_task():
+                _broadcast_workers.pop(device_no, None)
 
 
 async def _run_duty_broadcast_task(
@@ -231,8 +289,6 @@ async def _run_duty_broadcast_task(
             f"deviceNo={device_no} | 异常类型={type(exc).__name__} | "
             f"错误={str(exc)[:200]} | 耗时={elapsed_ms}ms"
         )
-    finally:
-        await _release_broadcast_device(device_no, broadcast_id)
 
 
 def _next_dialog_version(device_no: str) -> int:
@@ -814,35 +870,36 @@ async def duty_broadcast_tts(request: DutyBroadcastRequest):
         )
 
     async with _broadcast_lock:
-        if (
-            device_no in _pending_broadcast_devices
-            or ws_device_manager.is_device_streaming(device_no)
-        ):
+        queue = _get_or_create_broadcast_queue(device_no)
+        if queue.full():
             logger.warning(
-                f"值班播报失败 | 设备正在播报 | request_id={request_id} | "
-                f"deviceNo={device_no}"
+                f"Duty broadcast queue full | request_id={request_id} | "
+                f"deviceNo={device_no} | queueSize={queue.qsize()} | "
+                f"queueMax={queue.maxsize}"
             )
             return _build_broadcast_response(
                 request_id=request_id,
                 success=False,
-                reason="设备正在播报",
+                reason="播报队列已满",
             )
-        _pending_broadcast_devices.add(device_no)
 
-    asyncio.create_task(
-        _run_duty_broadcast_task(
-            broadcast_id=request_id,
-            device_no=device_no,
-            broadcast_content=broadcast_content,
-            accepted_at=start_time,
-        ),
-        name=f"duty-broadcast-{request_id}",
-    )
+        queue.put_nowait(
+            _BroadcastJob(
+                broadcast_id=request_id,
+                device_no=device_no,
+                broadcast_content=broadcast_content,
+                accepted_at=start_time,
+            )
+        )
+        queue_size = queue.qsize()
+        queue_max = queue.maxsize
+        _ensure_broadcast_worker_locked(device_no)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
-        f"值班播报任务已接收 | request_id={request_id} | "
-        f"deviceNo={device_no} | 耗时={elapsed_ms}ms"
+        f"Duty broadcast task enqueued | request_id={request_id} | "
+        f"deviceNo={device_no} | queueSize={queue_size} | queueMax={queue_max} | "
+        f"elapsed={elapsed_ms}ms"
     )
     return _build_broadcast_response(
         request_id=request_id,
