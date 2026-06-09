@@ -199,13 +199,194 @@ def _ensure_keyword_content_from_config(
 ) -> str:
     if _keyword_content_in_asr(keyword_content, asr_text):
         return keyword_content.strip()
-    return _find_semantic_keyword_from_config(
+    result = _find_semantic_keyword_from_config(
         keyword_config_manager=keyword_config_manager,
         config_item_id=config_item_id,
         asr_text=asr_text,
     )
+    return result
 
-# 全局并发控制信号量（单节点最大5路并发）
+
+def _format_config_label(names: list[str], behavior_type: str) -> str:
+    if names:
+        return "、".join(_display_config_label(name) for name in names if name)
+    if behavior_type == BehaviorType.ABNORMAL:
+        return "异常行为"
+    if behavior_type == BehaviorType.CUSTOMER:
+        return "顾客反馈"
+    return "标准服务行为"
+
+
+def _display_config_label(config_label: str) -> str:
+    label = (config_label or "").strip()
+    label = re.sub(r"\d+$", "", label) or label
+    label_aliases = {
+        "卫生卫生": "卫生问题",
+        "产品质量": "菜品质量",
+        "菜品差评": "菜品问题",
+        "服务投诉": "服务问题",
+        "价格抱怨": "价格问题",
+        "整体失望": "整体体验",
+    }
+    return label_aliases.get(label, label)
+
+
+def _get_config_item_name(config_item_id: str) -> str:
+    target_id = (config_item_id or "").strip()
+    if not target_id:
+        return ""
+    for config_items in keyword_config_manager.get_keyword_groups().values():
+        for config_item in config_items:
+            if str(config_item.get("configItemId", "")).strip() == target_id:
+                return str(config_item.get("configItemName", "")).strip()
+    return ""
+
+
+def _normalize_text_for_compare(text: str) -> str:
+    return re.sub(r"[\s，。！？、,.!?；;：“”\"'（）()\[\]【】<>《》]+", "", text or "")
+
+
+def _clean_behavior_summary(summary: str) -> str:
+    value = re.sub(r"\s+", "", (summary or "").strip())
+    return value.strip(" ，；;")
+
+
+def _has_mechanical_summary_style(summary: str) -> bool:
+    value = summary or ""
+    bad_patterns = (
+        "命中",
+        "规则",
+        "词库",
+        "关键词",
+        "配置项",
+        "对话片段",
+        "语音中出现",
+        "属于",
+        "匹配",
+    )
+    return any(pattern in value for pattern in bad_patterns)
+
+
+def _is_behavior_summary_usable(
+    summary: str,
+    behavior_type: str,
+    keyword: str,
+    config_label: str,
+    asr_text: str,
+) -> bool:
+    value = _clean_behavior_summary(summary)
+    if not value or len(value) > 100:
+        return False
+    if _has_mechanical_summary_style(value):
+        return False
+
+    normalized_summary = _normalize_text_for_compare(value)
+    normalized_asr = _normalize_text_for_compare(asr_text)
+    if normalized_asr and normalized_summary:
+        if normalized_summary == normalized_asr:
+            return False
+        if len(normalized_summary) >= 30 and normalized_summary in normalized_asr:
+            return False
+
+    if behavior_type in (BehaviorType.ABNORMAL, BehaviorType.CUSTOMER):
+        label = _display_config_label(config_label)
+        if keyword and keyword in value:
+            return True
+        if label and label not in ("异常行为", "顾客反馈") and label in value:
+            return True
+        if behavior_type == BehaviorType.ABNORMAL and ("员工" in value or "服务" in value):
+            return True
+        if behavior_type == BehaviorType.CUSTOMER and "顾客" in value:
+            return True
+        return False
+
+    return True
+
+
+def _fallback_behavior_summary(
+    behavior_type: str,
+    keyword: str,
+    config_label: str,
+    asr_text: str,
+) -> str:
+    label = _display_config_label(config_label)
+    if behavior_type == BehaviorType.ABNORMAL:
+        if keyword and label and label != "异常行为":
+            return f"服务沟通中出现与“{keyword}”相关的不当表述，归类为{label}。"
+        if keyword:
+            return f"服务沟通中出现与“{keyword}”相关的不当表述。"
+        if label and label != "异常行为":
+            return f"服务沟通中出现{label}相关异常行为。"
+        return "服务沟通中出现异常行为。"
+
+    if behavior_type == BehaviorType.CUSTOMER:
+        if keyword and label and label != "顾客反馈":
+            return f"顾客表达了与“{keyword}”相关的不满，归类为{label}。"
+        if keyword:
+            return f"顾客表达了与“{keyword}”相关的不满。"
+        if label and label != "顾客反馈":
+            return f"顾客表达了{label}相关不满。"
+        return "顾客表达了服务体验相关不满。"
+
+    return _clean_behavior_summary(asr_text) or "标准服务行为。"
+
+
+def _build_behavior_summary(
+    behavior_type: str,
+    keyword_content: str,
+    asr_text: str,
+    keyword_matches: list[dict] | None = None,
+    config_item_id: str = "",
+    fallback_summary: str = "",
+) -> str:
+    keyword = (keyword_content or "").strip()
+    source = (asr_text or "").strip()
+    if behavior_type == BehaviorType.STANDARD:
+        summary = _clean_behavior_summary(fallback_summary)
+        if summary and len(summary) <= 100 and not _has_mechanical_summary_style(summary):
+            return summary[:100]
+        return (_clean_behavior_summary(source) or "标准服务行为。")[:100]
+
+    if not keyword:
+        summary = _clean_behavior_summary(fallback_summary)
+        if summary and len(summary) <= 100 and not _has_mechanical_summary_style(summary):
+            return summary[:100]
+        return "未命中有效行为关键词。"
+
+    matched_names = []
+    for match in keyword_matches or []:
+        match_keyword = str(match.get("keyword_content") or match.get("keywordContent") or "").strip()
+        if match_keyword and match_keyword not in keyword:
+            continue
+        config_name = str(match.get("config_item_name") or match.get("configItemName") or "").strip()
+        if config_name and config_name not in matched_names:
+            matched_names.append(config_name)
+
+    if not matched_names:
+        config_name = _get_config_item_name(config_item_id)
+        if config_name:
+            matched_names.append(config_name)
+
+    config_label = _format_config_label(matched_names, behavior_type)
+    summary = _clean_behavior_summary(fallback_summary)
+    if _is_behavior_summary_usable(
+        summary=summary,
+        behavior_type=behavior_type,
+        keyword=keyword,
+        config_label=config_label,
+        asr_text=source,
+    ):
+        return summary[:100]
+
+    summary = _fallback_behavior_summary(
+        behavior_type=behavior_type,
+        keyword=keyword,
+        config_label=config_label,
+        asr_text=source,
+    )
+    return summary[:100]
+
+# 全局并发控制信号量
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 # 幂等性缓存实例
@@ -689,6 +870,15 @@ async def behavior_recognition(
                 )
             else:
                 is_abnormal = behavior_type == BehaviorType.ABNORMAL
+
+            summary = _build_behavior_summary(
+                behavior_type=behavior_type,
+                keyword_content=keyword_content,
+                asr_text=asr_text,
+                keyword_matches=keyword_matches,
+                config_item_id=config_item_id,
+                fallback_summary=summary,
+            )
 
             # ========== ⑥ 异常音频裁剪 ==========
             abnormal_audio_clip = None
