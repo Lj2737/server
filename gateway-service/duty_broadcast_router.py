@@ -111,6 +111,7 @@ _dialog_locks: Dict[str, asyncio.Lock] = {}
 _broadcast_lock = asyncio.Lock()
 _broadcast_queues: Dict[str, asyncio.Queue] = {}
 _broadcast_workers: Dict[str, asyncio.Task] = {}
+_active_broadcast_devices: set[str] = set()
 _DIALOG_INTERRUPT_WAIT_SECONDS = 1.0
 _DIALOG_START_DEBOUNCE_SECONDS = 0.35
 
@@ -212,6 +213,16 @@ def _ensure_broadcast_worker_locked(device_no: str) -> None:
     _broadcast_workers[device_no] = worker
 
 
+def _has_broadcast_work_locked(device_no: str) -> bool:
+    queue = _broadcast_queues.get(device_no)
+    return device_no in _active_broadcast_devices or bool(queue and not queue.empty())
+
+
+async def _has_broadcast_work(device_no: str) -> bool:
+    async with _broadcast_lock:
+        return _has_broadcast_work_locked(device_no)
+
+
 async def _broadcast_worker(device_no: str) -> None:
     logger.info(f"Duty broadcast worker started | deviceNo={device_no}")
     try:
@@ -224,6 +235,7 @@ async def _broadcast_worker(device_no: str) -> None:
                     logger.info(f"Duty broadcast worker stopped | deviceNo={device_no}")
                     return
                 job = queue.get_nowait()
+                _active_broadcast_devices.add(device_no)
 
             try:
                 await _run_duty_broadcast_task(
@@ -234,6 +246,8 @@ async def _broadcast_worker(device_no: str) -> None:
                 )
             finally:
                 queue.task_done()
+                async with _broadcast_lock:
+                    _active_broadcast_devices.discard(device_no)
     except asyncio.CancelledError:
         logger.info(f"Duty broadcast worker cancelled | deviceNo={device_no}")
         raise
@@ -243,6 +257,7 @@ async def _broadcast_worker(device_no: str) -> None:
             f"errorType={type(exc).__name__} | error={str(exc)[:200]}"
         )
         async with _broadcast_lock:
+            _active_broadcast_devices.discard(device_no)
             current_worker = _broadcast_workers.get(device_no)
             if current_worker is asyncio.current_task():
                 _broadcast_workers.pop(device_no, None)
@@ -505,6 +520,21 @@ async def _handle_device_message(device_no: str, websocket: WebSocket, text: str
                 return
             if payload_device_no and payload_device_no != device_no:
                 await ws_device_manager.send_text(device_no, {"type": "dialog_start_ack", "dialogId": dialog_id, "success": False, "message": "deviceNo does not match websocket path"})
+                return
+            if await _has_broadcast_work(device_no):
+                await ws_device_manager.send_text(
+                    device_no,
+                    {
+                        "type": "dialog_start_ack",
+                        "dialogId": dialog_id,
+                        "success": False,
+                        "message": "device is broadcasting",
+                    },
+                )
+                logger.warning(
+                    f"AI dialog start rejected by active broadcast | "
+                    f"deviceNo={device_no} | dialogId={dialog_id}"
+                )
                 return
 
             now = time.time()
@@ -894,6 +924,16 @@ async def duty_broadcast_tts(request: DutyBroadcastRequest):
         queue_size = queue.qsize()
         queue_max = queue.maxsize
         _ensure_broadcast_worker_locked(device_no)
+
+    interrupted_dialog_id = await _cancel_active_dialog_locked(
+        device_no,
+        reason=f"duty_broadcast:{request_id}",
+    )
+    if interrupted_dialog_id:
+        logger.info(
+            f"Duty broadcast interrupted AI dialog | request_id={request_id} | "
+            f"deviceNo={device_no} | interruptedDialogId={interrupted_dialog_id}"
+        )
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
